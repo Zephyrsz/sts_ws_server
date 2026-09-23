@@ -1,0 +1,17 @@
+[Unit]
+Description=Ornith Chat Completions WebSocket bridge
+After=network-online.target llama-server.service
+Wants=network-online.target
+Requires=llama-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=/app/sts_ws_server
+EnvironmentFile=/app/sts_ws_server/ornith.env
+ExecStart=/app/sts_ws_server/venv/bin/uvicorn sts_ws_server.llm_wss:app --host 0.0.0.0 --port 18444 --ssl-certfile /app/sts_ws_server/tls/llm-wss.crt --ssl-keyfile /app/sts_ws_server/tls/llm-wss.key --ws-max-size 4194304
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

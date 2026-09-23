@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sts-ws-server"
+version = "0.1.0"
+description = "Independent WebSocket adapters for ASR and streaming TTS model services"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<1",
+    "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+asr = ["faster-whisper>=1.1,<2"]
+vad = ["onnxruntime>=1.17.0"]
+kotoba = ["torch>=2.2", "transformers>=4.39,<5", "accelerate>=0.28"]
+test = ["pytest>=8,<9", "pytest-asyncio>=0.24,<2", "httpx>=0.28,<1", "numpy>=1.26"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

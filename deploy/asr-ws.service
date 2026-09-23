@@ -1,0 +1,25 @@
+[Unit]
+Description=ASR WebSocket service with Silero VAD and Kotoba Whisper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=roger
+Group=roger
+WorkingDirectory=/app/sts_ws_server/asr-service
+EnvironmentFile=/etc/sts-ws-server/asr.env
+Environment=HOME=/tmp
+Environment=HF_HOME=/tmp/sts-ws-hf
+Environment=HF_HUB_OFFLINE=1
+Environment=PYTHONPATH=/app/sts_ws_server/asr-service/src
+ExecStart=/app/sts_ws_server/venv/bin/python -m uvicorn sts_ws_server.app:app --host 172.19.0.1 --port 8011 --workers 1 --ws-max-size 4194304
+Restart=on-failure
+RestartSec=5
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Ornith 1.5 llama.cpp OpenAI-compatible API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/app/sts_ws_server
+Environment=CUDA_VISIBLE_DEVICES=0,2
+Environment=LD_LIBRARY_PATH=/app/sts_ws_server/llama.cpp/cuda-runtime
+ExecStart=/app/sts_ws_server/llama.cpp/llama-server --model /app/sts_ws_server/models/ornith/Ornith-1.5-35B-Q8_0.gguf --alias Ornith-1.5-35B-A3B --host 127.0.0.1 --port 18080 --ctx-size 32768 --n-gpu-layers 999 --split-mode layer --tensor-split 1,1 --parallel 1 --jinja --no-webui
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target
