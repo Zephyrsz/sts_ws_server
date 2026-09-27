@@ -51,7 +51,7 @@ flowchart LR
 | `qwen3-tts-vllm.service` | 主机 systemd 系统服务 | `172.19.0.1:8091` | 加载 Qwen3-TTS、提供 `/v1/audio/speech` |
 | Qwen3-TTS 权重 | 主机文件系统 | `/app/sts_ws_server/models/tts/qwen3` | 模型配置、tokenizer、主模型和 speech tokenizer |
 | 适配器 Python 环境 | 主机 venv | `/app/sts_ws_server/venv` | FastAPI、Uvicorn、HTTP 客户端和 WSS 代码 |
-| vLLM Python 环境 | 主机 venv | `/app/sts_ws_server/qwen-venv` | Python 3.12、vLLM、vLLM-Omni、CUDA PyTorch |
+| 共享 Python 环境 | 主机 venv | `/app/sts_ws_server/venv` | Python 3.13、FastAPI、vLLM、vLLM-Omni、CUDA PyTorch |
 
 两个 systemd 服务都以 `roger:roger` 运行，不使用 root 权限。适配器通过 `Requires=qwen3-tts-vllm.service` 和 `After=qwen3-tts-vllm.service` 声明依赖及启动顺序；两个 unit 各自使用 `Restart=on-failure`，模型服务重启后应按下文的健康检查确认适配器也已恢复。
 
@@ -106,8 +106,8 @@ flowchart LR
 | vLLM-Omni | `0.24.0` |
 | PyTorch | `2.11.0+cu130` |
 | CUDA runtime | `13.0` |
-| vLLM Python | 3.12.3 环境 `/app/sts_ws_server/qwen-venv` |
-| WSS Python | 3.14.6 环境 `/app/sts_ws_server/venv` |
+| 共享 Python | 3.13.15 环境 `/app/sts_ws_server/venv` |
+| 旧回滚环境 | `/app/sts_ws_server/venv-py314-old`（仅保留回滚） |
 | 模型别名 | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` |
 | 推理 GPU | `CUDA_VISIBLE_DEVICES=0`，NVIDIA L20 |
 | 最大模型长度 | vLLM `/v1/models` 当前报告 `4096` |
@@ -126,10 +126,10 @@ User=roger
 Environment=CUDA_VISIBLE_DEVICES=0
 Environment=HF_HUB_OFFLINE=1
 Environment=PYTHONUNBUFFERED=1
-Environment=PATH=/app/sts_ws_server/qwen-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
-ExecStart=/app/sts_ws_server/qwen-venv/bin/vllm serve \
+Environment=PATH=/app/sts_ws_server/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+ExecStart=/app/sts_ws_server/venv/bin/vllm serve \
   /app/sts_ws_server/models/tts/qwen3 \
-  --deploy-config /app/sts_ws_server/qwen-venv/lib/python3.12/site-packages/vllm_omni/deploy/qwen3_tts.yaml \
+  --deploy-config /app/sts_ws_server/venv/lib/python3.13/site-packages/vllm_omni/deploy/qwen3_tts.yaml \
   --omni --host 172.19.0.1 --port 8091 \
   --trust-remote-code --enforce-eager \
   --served-model-name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
@@ -139,7 +139,7 @@ TimeoutStartSec=0
 LimitNOFILE=1048576
 ```
 
-`PATH` 显式包含 `qwen-venv/bin`，因为 vLLM-Omni 初始化可能调用该环境中的 `ninja`。systemd 环境不能假设交互式 shell 的 PATH 已经生效。
+`PATH` 显式包含共享 venv 的 `bin`，因为 vLLM-Omni 初始化可能调用该环境中的 `ninja`。systemd 环境不能假设交互式 shell 的 PATH 已经生效。
 
 ### 6.2 WSS 适配器
 

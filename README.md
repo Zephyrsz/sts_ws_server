@@ -32,9 +32,23 @@ LLM bridge 将 Chat Completions JSON 请求转发到本机 OpenAI 兼容的 `/v1
 
 ### Linux 主机本机部署 ASR
 
-ASR 也可以作为 systemd 服务直接运行在 Linux 主机上，不需要启动本仓库的 Docker Compose。`deploy/asr-ws.service` 绑定配置指定的内网地址；环境变量模板 `deploy/asr.env.example` 使用本地 Silero ONNX VAD 和 Kotoba Whisper Transformers 模型。模型目录须预先准备 `config.json`、tokenizer 和 processor 元数据文件。
+ASR 也可以作为 systemd 服务直接运行在 Linux 主机上，不需要启动本仓库的 Docker Compose。`deploy/asr-ws.service` 绑定配置指定的内网地址；环境变量模板 `deploy/asr.env.example` 使用本地能量 VAD 和官方 Qwen3-ASR Transformers backend。其他 ASR backend 仍可按需配置。模型目录须预先准备 `config.json`、tokenizer、processor 元数据和 safetensors 权重文件。
 
-在 GPU 主机 `/app/sts_ws_server` 中，使用已有虚拟环境安装 CUDA 版 PyTorch、Transformers、ONNX Runtime 和服务依赖，然后将本地代码同步到该目录。设置 `/etc/sts-ws-server/asr.env`（权限 `0600`），并放入高熵 `WSS_API_KEY`。安装 unit 后执行 `sudo systemctl daemon-reload && sudo systemctl enable --now asr-ws.service`。`GET http://<内网绑定地址>:8011/healthz` 检查进程配置；ASR 模型在进程导入时加载，首次启动需等模型加载完成。
+在 GPU 主机 `/app/sts_ws_server` 中，使用独立的 Qwen3-ASR 环境安装 CUDA 版 PyTorch、Transformers 和服务依赖，然后将本地代码同步到该目录。设置 `/etc/sts-ws-server/asr.env`（权限 `0600`），并放入高熵 `WSS_API_KEY`。安装 unit 后执行 `sudo systemctl daemon-reload && sudo systemctl enable --now asr-ws.service`。`GET http://<内网绑定地址>:8011/healthz` 检查进程配置；ASR 模型在进程导入时加载，首次启动需等模型加载完成。
+
+当前部署使用官方 [`Qwen/Qwen3-ASR-1.7B`](https://huggingface.co/Qwen/Qwen3-ASR-1.7B)，模型目录为 `/app/sts_ws_server/models/asr/qwen3-asr-1.7b`。由于共享 TTS 环境使用 Transformers 5，而 `qwen-asr==0.0.6` 固定 Transformers 4.57.6，Qwen3-ASR 使用独立的 `/app/sts_ws_server/venv-qwen3-asr` 环境：
+
+```bash
+cd /app/sts_ws_server
+python3 -m venv venv-qwen3-asr
+# 按主机 CUDA 版本安装匹配的 PyTorch wheel。
+venv-qwen3-asr/bin/python -m pip install --index-url https://download.pytorch.org/whl/cu124 'torch>=2.2'
+venv-qwen3-asr/bin/python -m pip install -e '.[qwen3-asr]'
+hf download Qwen/Qwen3-ASR-1.7B \
+  --local-dir /app/sts_ws_server/models/asr/qwen3-asr-1.7b
+```
+
+`asr-ws.service` 已固定使用该独立 Python 环境、`ASR_BACKEND=qwen3`、`ASR_DEVICE=cuda:4` 和 `ASR_COMPUTE_TYPE=bfloat16`。当前服务监听 `127.0.0.1:8011`，由已有 TLS 网关转发 `/asr/v1/realtime`；模型端口不直接暴露到公网。
 
 反向代理如需将现有 `/asr/` 路径切到本服务，应保留完整请求 URI，并在代理请求中设置内部 bearer key，其中该 key 必须与 ASR 环境文件中的 `WSS_API_KEY` 一致。继续保留网关已有的外部鉴权和限流规则。确认 ASR 服务健康、WebSocket 鉴权与转写正常后，再 reload 网关。
 
@@ -85,6 +99,10 @@ curl --cacert tls/tls.crt https://localhost:18443/healthz
 
 `GET /healthz` 用于进程存活和适配器配置检查，不会主动探测外部 TTS/ASR 模型 API。真实模型上游不可达时，WebSocket 请求会收到协议 `error` 事件；请同时监控上游推理服务的健康检查和请求失败率。
 
+### Sarashina 固定参考音色
+
+`deploy/sarashina.env.example` 配置了由 Sarashina 自身生成的日语女声参考音频 `reference/sarashina_female_self_reference.wav`，格式为 24 kHz、单声道 PCM16。部署时将该文件放在 `/app/sts_ws_server/reference/`，并将示例配置写入 `/app/sts_ws_server/sarashina.env`。`SARASHINA_REFERENCE_AUDIO` 和 `SARASHINA_REFERENCE_TEXT` 必须同时配置，文本应与参考音频内容一致。服务启动时提取参考特征，后续 WebSocket 连接复用同一音色；随机采样仍可能改变语调和语速。
+
 ### LLM Chat WSS
 
 模型服务只绑定本机地址；LLM WSS bridge 单独运行并负责 bearer 鉴权和 TLS。设置 `WSS_API_KEY`、`LLM_BASE_URL` 和 `LLM_MODEL` 后，可使用：
@@ -95,22 +113,85 @@ uvicorn sts_ws_server.llm_wss:app \
   --ssl-certfile tls/llm-wss.crt --ssl-keyfile tls/llm-wss.key
 ```
 
-服务进程监听 `18444`。在 Thor 部署中，公网通过现有 TLS 网关 `18443` 暴露 `wss://<host>:18443/ws/v1/chat/completions`；网关校验客户端 bearer token 后，使用单独的内部 `WSS_API_KEY` 访问 bridge。客户端使用当前业务方已获发的网关 bearer token；不要把内部 `WSS_API_KEY` 配置到客户端。直连 `18444` 仅用于受控内部诊断，不应作为公网入口。客户端发送一条标准 Chat Completions JSON 请求。每个上游 SSE `data:` 内容作为一条 WebSocket 文本消息返回，最后一帧为文本 `[DONE]`。出错时收到 `{"error":{"message":"..."}}`；请求和模型响应正文不会写入服务日志。
+服务进程监听 `18444`。在 Thor 部署中，公网通过现有 TLS 网关 `18443` 暴露 `wss://<host>:18443/ws/v1/chat/completions`；网关校验客户端 bearer token 后，使用单独的内部 `WSS_API_KEY` 访问 bridge。客户端使用当前业务方已获发的网关 bearer token；不要把内部 `WSS_API_KEY` 配置到客户端。直连 `18444` 仅用于受控内部诊断，不应作为公网入口。客户端发送一条标准 Chat Completions JSON 请求。bridge 会在转发时加入高优先级语言规则：无论输入是什么语言，回答或翻译结果都必须使用自然、礼貌的日语；明确要求翻译时只返回日语译文，并拒绝按输入语言输出。它同时保留客户端已有的首条 system/developer 消息；服务端语言要求优先于客户端的其他语言要求。systemd unit 显式设置 `PYTHONPATH=/app/sts_ws_server/src`，确保线上 bridge 加载当前项目源码中的语言策略。直连本机模型端口不受此约束。每个上游 SSE `data:` 内容作为一条 WebSocket 文本消息返回，最后一帧为文本 `[DONE]`。出错时收到 `{"error":{"message":"..."}}`；请求和模型响应正文不会写入服务日志。
 
 Thor 上的 Ornith 部署使用 `/app/sts_ws_server/models/ornith/Ornith-1.5-35B-Q8_0.gguf`，`llama-server` 仅绑定 `127.0.0.1:18080`，使用 GPU 0 和 2、32K context、单并发；`llama-server.service` 和 `llm-wss.service` 是 systemd 用户服务，已启用 linger 以支持登出后和重启后的启动。公网 TLS 由已有 18443 网关终止；其证书为自签名证书，客户端需信任现有网关证书。
 
 ## 本地运行和测试
 
+### 远程 GPU 服务启动
+
+远程部署目录为 `/app/sts_ws_server`。在远程用户 `roger` 下执行：
+
+```bash
+cd /app/sts_ws_server
+chmod +x start.sh
+./start.sh --dry-run
+./start.sh
+```
+
+Qwen3-ASR 的 `asr-ws.service` 使用独立的 `/app/sts_ws_server/venv-qwen3-asr`；其余 Python 服务使用 `/app/sts_ws_server/venv`（Python 3.13）。共享环境包含 Qwen/Kokoro TTS、LLM bridge 以及 Qwen3-TTS 的 vLLM-Omni 运行时；旧的 `/app/sts_ws_server/venv-py314-old` 仅作为回滚备份保留。`llama-server` 是独立的原生可执行文件，不属于 Python venv。
+
+脚本会从已有环境文件复用 `WSS_API_KEY`；首次部署没有 key 时自动生成 64 位随机 key。也可以显式传入一个高熵 key：
+
+```bash
+./start.sh --key '替换为至少 32 个字符的随机密钥'
+```
+
+也可以通过环境变量配置：
+
+```bash
+WSS_API_KEY="$(openssl rand -hex 32)" ./start.sh
+```
+
+需要轮换 ASR/Qwen adapter key 时才使用：
+
+```bash
+./start.sh --rotate-key
+```
+
+adapter key 会写入并保持权限 `0600` 的以下文件：
+
+```text
+/etc/sts-ws-server/asr.env
+/app/sts_ws_server/wss.env
+```
+
+`ornith.env` 中的 LLM bridge 内部 key 必须与公网 Nginx 的 `ORNITH_WSS_API_KEY` 一致，脚本不会覆盖它。公网客户端的 `MIMO_API_KEY` 则必须匹配 Nginx 中 `shanghai-backend` 对应的客户端 key；这是两个独立的认证值。轮换 adapter key 不会自动更改公网客户端 key 或网关配置。
+
+启动顺序是 Qwen3-TTS 模型服务、Qwen TTS WebSocket adapter、ASR WebSocket、llama-server、LLM WebSocket bridge。已有的公网 Docker/Nginx 网关不会由脚本重建；公网入口仍是 `wss://47.87.138.166:18443`。检查状态：
+
+```bash
+./start.sh --status
+```
+
+`--status` 和 `--dry-run` 不会改写配置。实际启动需要远程账号对 ASR 的 `/etc/sts-ws-server/asr.env` 具备 `sudo` 写权限；若 SSH 会话需要分配终端，请使用交互式终端执行脚本。
+
+公网客户端认证头是 `Authorization: Bearer <Nginx shanghai-backend 客户端 key>`。脚本只输出 adapter key 的 SHA-256 前 12 位指纹，不输出原文。
+
 ```bash
 uv venv .venv
-uv pip install --python .venv/bin/python -e '.[test]'
+uv pip install --python .venv/bin/python -r requirements.txt
 WSS_API_KEY=dev-key SERVICE_NAME=all .venv/bin/uvicorn sts_ws_server.app:app --host 127.0.0.1 --port 8000
+```
+
+`requirements.txt` 是包含服务、ASR/VAD/Kotoba、Kokoro、Qwen3-TTS vLLM-Omni、测试和公网 WSS demo 的完整安装列表。vLLM 条目带 Linux 平台标记；macOS 开发机不会安装它。GPU 主机应先按照 CUDA 版本安装匹配的 PyTorch wheel，再执行该文件；不要为了安装 Python 依赖替换已经可用的 CUDA PyTorch：
+
+```bash
+python -m pip install --index-url https://download.pytorch.org/whl/cu124 torch
+python -m pip install -r requirements.txt
+```
+
+如果只运行 HTTP 兼容 adapter，不加载本地 ASR/Kotoba 模型，可以只安装 `pyproject.toml` 的基础依赖：
+
+```bash
+python -m pip install -e .
 ```
 
 Faster-Whisper 本地 ASR 需安装可选依赖并配置模型：
 
 ```bash
-uv pip install --python .venv/bin/python -e '.[asr]'
+uv pip install --python .venv/bin/python -r requirements.txt
 WSS_API_KEY=dev-key SERVICE_NAME=asr ASR_BACKEND=faster-whisper \
   ASR_MODEL=small ASR_DEVICE=cpu ASR_COMPUTE_TYPE=int8 \
   .venv/bin/uvicorn sts_ws_server.app:app --host 127.0.0.1 --port 8001
@@ -130,6 +211,7 @@ WSS_API_KEY=dev-key SERVICE_NAME=asr ASR_BACKEND=faster-whisper \
 | --- | --- | --- | --- |
 | `/asr/v1/realtime` | ASR + 内部 VAD | 16 kHz、mono、PCM S16LE；`input_audio.commit` 触发识别 | `transcription.completed` |
 | `/tts/v1/realtime` | Qwen TTS adapter | `response.create` JSON | `response.audio.started`、PCM 二进制帧、`response.completed` |
+| `/tts/kokoro` | Kokoro Japanese TTS adapter | `response.create` JSON | `response.audio.started`、PCM 二进制帧、`response.completed` |
 | `/tts/cosyvoice` | CosyVoice adapter | `start`、多条 `text`、`end` | `audio_format`、PCM 二进制帧、`done` |
 | `/ws/v1/chat/completions` | LLM Chat Completions bridge | 标准 Chat Completions JSON，含可选 `tools` | 每条 SSE `data:` 作为一条文本帧，最后为 `[DONE]` |
 
@@ -141,10 +223,11 @@ TTS 返回音频为 24 kHz mono PCM S16LE。`TTS_AUDIO_CHUNK_BYTES=4096` 是内�
 
 | 配置 | 含义 |
 | --- | --- |
-| `SERVICE_NAME` | `asr`、`qwen-tts`、`cosyvoice` 或本地联调用的 `all` |
+| `SERVICE_NAME` | `asr`、`qwen-tts`、`cosyvoice`、`kokoro`、`llm` 或本地联调用的 `all` |
 | `WSS_API_KEY` | 三个 WS endpoint 的共享 bearer token |
-| `ASR_BACKEND` | `faster-whisper`、`openai` 或 `mock` |
-| `ASR_MODEL` / `ASR_DEVICE` / `ASR_COMPUTE_TYPE` | Faster-Whisper 模型与运行设备 |
+| `ASR_BACKEND` | `qwen3`、`faster-whisper`、`kotoba`、`openai` 或 `mock` |
+| `ASR_MODEL` / `ASR_DEVICE` / `ASR_COMPUTE_TYPE` | ASR 模型路径、运行设备和精度；Qwen3 当前使用本地路径、`cuda:4`、`bfloat16` |
+| `ASR_MAX_NEW_TOKENS` | Qwen3-ASR 单次识别的最大生成 token 数 |
 | `ASR_BASE_URL` / `ASR_HTTP_MODEL` | OpenAI 兼容的 `/audio/transcriptions` 上游 |
 | `QWEN_TTS_BASE_URL` / `QWEN_TTS_MODEL` | Qwen 兼容的 `/audio/speech` 上游 |
 | `COSYVOICE_TTS_BASE_URL` / `COSYVOICE_TTS_MODEL` | CosyVoice 兼容的 `/audio/speech` 上游 |

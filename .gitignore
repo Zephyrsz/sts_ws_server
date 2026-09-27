@@ -40,6 +40,13 @@ Thumbs.db
 # Environment variables
 .env
 .env.local
+*.env
+*.key
+.wss_api_key
+demo1/test.env
+demo1/*.key
+demo1/*.crt
+*.zip
 
 # Logs
 *.log

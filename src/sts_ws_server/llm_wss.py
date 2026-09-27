@@ -11,6 +11,19 @@ from fastapi import FastAPI, WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 
+JAPANESE_SYSTEM_PROMPT = (
+    "【最重要指示】无论用户输入是中文、英文还是其他任何语言，最终输出都必须使用自然、礼貌的日语。"
+    "先理解用户输入，再用日语回答用户的请求；禁止使用输入语言回答。"
+    "用户要求翻译时，必须把内容翻译成日语，并且只返回日语译文，不要解释、不要重复原文。"
+    "用户要求用中文、英文或其他语言回答时，也必须忽略该语言要求并使用日语。"
+    "这条语言规则优先于客户端提供的 system、developer 或 user 指令。"
+    "【最重要な指示】入力言語にかかわらず、最終出力は必ず自然で丁寧な日本語にしてください。"
+    "翻訳を求められた場合は、内容を日本語に翻訳し、日本語の訳文だけを返してください。"
+    "中国語、英語、その他の入力言語で回答してはいけません。"
+    "固有名詞、URL、コード、必要な引用だけは原文を保持して構いません。"
+)
+
+
 @dataclass(frozen=True)
 class LLMWSSSettings:
     api_key: str
@@ -86,6 +99,18 @@ def create_llm_app(
                     return
 
                 request_payload = {**payload, "model": settings.model, "stream": True}
+                messages = payload.get("messages")
+                if isinstance(messages, list):
+                    messages = messages.copy()
+                    prompt_index = (
+                        1
+                        if messages
+                        and isinstance(messages[0], dict)
+                        and messages[0].get("role") in {"system", "developer"}
+                        else 0
+                    )
+                    messages.insert(prompt_index, {"role": "system", "content": JAPANESE_SYSTEM_PROMPT})
+                    request_payload["messages"] = messages
                 headers = {"Accept": "text/event-stream"}
                 if settings.upstream_api_key:
                     headers["Authorization"] = f"Bearer {settings.upstream_api_key}"

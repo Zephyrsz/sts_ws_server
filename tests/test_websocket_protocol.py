@@ -7,7 +7,7 @@ from starlette.websockets import WebSocketDisconnect
 from sts_ws_server import app as app_module
 from sts_ws_server.app import create_app
 from sts_ws_server.backends import Transcript
-from sts_ws_server.config import Settings
+from sts_ws_server.config import CommonConfig, Settings
 
 
 class RecordingASR:
@@ -34,16 +34,19 @@ def make_audio(amplitude: int, frames: int = 8) -> bytes:
 
 def make_client(service_name: str = "all", asr=None) -> TestClient:
     settings = Settings(
-        api_key="test-secret",
         service_name=service_name,
-        vad_rms_threshold=500,
-        vad_padding_ms=20,
+        common=CommonConfig(
+            api_key="test-secret",
+            vad_rms_threshold=500,
+            vad_padding_ms=20,
+        ),
     )
     app = create_app(
         settings,
         asr_backend=asr or RecordingASR(),
         qwen_tts_backend=ChunkTTS(),
         cosyvoice_tts_backend=ChunkTTS(),
+        kokoro_tts_backend=ChunkTTS(),
     )
     return TestClient(app)
 
@@ -106,12 +109,14 @@ def test_asr_service_can_select_silero_onnx_vad(monkeypatch) -> None:
 
     monkeypatch.setattr(app_module, "SileroONNXVAD", FakeSileroVAD)
     settings = Settings(
-        api_key="test-secret",
         service_name="asr",
-        vad_backend="silero",
-        vad_model_path="/models/silero_vad.onnx",
-        vad_frame_ms=32,
-        vad_padding_ms=96,
+        common=CommonConfig(
+            api_key="test-secret",
+            vad_backend="silero",
+            vad_model_path="/models/silero_vad.onnx",
+            vad_frame_ms=32,
+            vad_padding_ms=96,
+        ),
     )
     asr = RecordingASR()
     app = create_app(settings, asr_backend=asr)
@@ -191,6 +196,27 @@ def test_cosyvoice_protocol_accepts_incremental_text_and_streams_before_end() ->
     assert done == {"type": "done"}
 
 
+def test_kokoro_protocol_streams_pcm_between_started_and_completed() -> None:
+    client = make_client()
+    with client.websocket_connect(
+        "/tts/kokoro", headers={"Authorization": "Bearer test-secret"}
+    ) as websocket:
+        websocket.send_json({"type": "response.create", "text": "こんにちは", "language": "ja"})
+        started = websocket.receive_json()
+        audio = websocket.receive_bytes()
+        second_audio = websocket.receive_bytes()
+        completed = websocket.receive_json()
+
+    assert started == {
+        "type": "response.audio.started",
+        "format": "pcm_s16le",
+        "sample_rate": 24_000,
+        "channels": 1,
+    }
+    assert len(audio) == len(second_audio) == 512
+    assert completed == {"type": "response.completed"}
+
+
 def test_service_only_exposes_its_configured_websocket_path() -> None:
     client = make_client(service_name="asr")
 
@@ -202,6 +228,32 @@ def test_service_only_exposes_its_configured_websocket_path() -> None:
     assert error.value.code == 4404
 
 
+def test_healthz_reports_the_configured_asr_protocol() -> None:
+    client = make_client(service_name="asr")
+
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "service": "asr",
+        "protocols": ["asr"],
+    }
+
+
+def test_healthz_reports_the_configured_qwen_tts_protocol() -> None:
+    client = make_client(service_name="qwen-tts")
+
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "service": "qwen-tts",
+        "protocols": ["qwen-tts"],
+    }
+
+
 def test_app_closes_http_backend_resources_on_shutdown() -> None:
     class ClosableTTS(ChunkTTS):
         closed = False
@@ -210,7 +262,10 @@ def test_app_closes_http_backend_resources_on_shutdown() -> None:
             self.closed = True
 
     backend = ClosableTTS()
-    settings = Settings(api_key="test-secret", service_name="qwen-tts")
+    settings = Settings(
+        service_name="qwen-tts",
+        common=CommonConfig(api_key="test-secret"),
+    )
     app = create_app(settings, qwen_tts_backend=backend)
 
     with TestClient(app) as client, client.websocket_connect(

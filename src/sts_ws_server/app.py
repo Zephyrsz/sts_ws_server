@@ -111,16 +111,20 @@ def create_app(
     asr_backend: ASRBackend | None = None,
     qwen_tts_backend: TTSBackend | None = None,
     cosyvoice_tts_backend: TTSBackend | None = None,
+    kokoro_tts_backend: TTSBackend | None = None,
 ) -> FastAPI:
     active_asr = asr_backend
     active_qwen = qwen_tts_backend
     active_cosyvoice = cosyvoice_tts_backend
+    active_kokoro = kokoro_tts_backend
     if _enabled("asr", settings) and active_asr is None:
         active_asr = create_asr_backend(settings)
     if _enabled("qwen-tts", settings) and active_qwen is None:
         active_qwen = create_tts_backend(settings, "qwen-tts")
     if _enabled("cosyvoice", settings) and active_cosyvoice is None:
         active_cosyvoice = create_tts_backend(settings, "cosyvoice")
+    if _enabled("kokoro", settings) and active_kokoro is None:
+        active_kokoro = create_tts_backend(settings, "kokoro")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -128,7 +132,7 @@ def create_app(
             yield
         finally:
             closed: set[int] = set()
-            for backend in (active_asr, active_qwen, active_cosyvoice):
+            for backend in (active_asr, active_qwen, active_cosyvoice, active_kokoro):
                 if backend is None or id(backend) in closed:
                     continue
                 closed.add(id(backend))
@@ -150,6 +154,7 @@ def create_app(
     app.state.asr_backend = active_asr
     app.state.qwen_tts_backend = active_qwen
     app.state.cosyvoice_tts_backend = active_cosyvoice
+    app.state.kokoro_tts_backend = active_kokoro
     app.state.inference_limiter = asyncio.Semaphore(settings.max_concurrent_requests)
     if settings.vad_backend == "energy":
         vad = EnergyVAD(
@@ -173,13 +178,17 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
-        active = [name for name in ("asr", "qwen-tts", "cosyvoice") if _enabled(name, settings)]
+        active = [
+            name for name in ("asr", "qwen-tts", "cosyvoice", "kokoro")
+            if _enabled(name, settings)
+        ]
         loaded = all(
             backend is not None
             for name, backend in (
                 ("asr", active_asr),
                 ("qwen-tts", active_qwen),
                 ("cosyvoice", active_cosyvoice),
+                ("kokoro", active_kokoro),
             )
             if name in active
         )
@@ -377,6 +386,60 @@ def create_app(
                     await websocket.send_json({"type": "done"})
                     return
                 await _error(websocket, "expected text or end")
+        except WebSocketDisconnect:
+            return
+
+    @app.websocket("/tts/kokoro")
+    async def kokoro_realtime(websocket: WebSocket) -> None:
+        if not await _accept_or_close(websocket, settings, "kokoro"):
+            return
+        assert active_kokoro is not None
+        try:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                payload = _parse_text_message(message)
+                if payload is None:
+                    await _error(websocket, "expected a JSON object message")
+                    continue
+                if payload.get("type") != "response.create":
+                    await _error(websocket, "expected response.create")
+                    continue
+                try:
+                    text = _string_field(payload, "text", required=True)
+                    voice = _string_field(payload, "voice") or settings.kokoro_tts_voice
+                    language = _string_field(payload, "language") or settings.kokoro_tts_language
+                    if len(text or "") > settings.kokoro_tts.max_text_chars:
+                        raise ValueError(
+                            f"text exceeds {settings.kokoro_tts.max_text_chars} characters"
+                        )
+                    await websocket.send_json(
+                        {
+                            "type": "response.audio.started",
+                            "format": "pcm_s16le",
+                            "sample_rate": settings.kokoro_tts_sample_rate,
+                            "channels": 1,
+                        }
+                    )
+                    await _stream_tts(
+                        websocket,
+                        active_kokoro,
+                        app.state.inference_limiter,
+                        text or "",
+                        voice,
+                        language,
+                    )
+                    await websocket.send_json({"type": "response.completed"})
+                except ValueError as exc:
+                    await _error(websocket, str(exc))
+                except WebSocketDisconnect:
+                    return
+                except ModelBackendError as exc:
+                    await _error(websocket, str(exc))
+                except Exception:
+                    logger.exception("Kokoro TTS request failed")
+                    await _error(websocket, "TTS inference failed")
         except WebSocketDisconnect:
             return
 

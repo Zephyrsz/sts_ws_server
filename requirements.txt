@@ -1,0 +1,42 @@
+# STS WebSocket server: runtime dependencies
+fastapi>=0.115,<1
+httpx>=0.28,<1
+uvicorn[standard]>=0.30,<1
+
+# Public WSS demo clients
+websocket-client>=1.8,<2
+
+# ASR, VAD, and Kotoba Whisper backend
+numpy>=1.26
+onnxruntime>=1.17
+faster-whisper>=1.1,<2
+torch>=2.2
+transformers>=5.5.3,<6
+accelerate==1.12.0
+
+# Qwen3-TTS vLLM-Omni model service (Linux GPU deployment only). These pins
+# are also used by qwen3-tts-vllm.service in the shared Python 3.13 venv.
+vllm==0.24.0; platform_system == "Linux"
+vllm-omni==0.24.0; platform_system == "Linux"
+
+# Local Japanese Kokoro-82M TTS backend. The current PyPI metadata incorrectly
+# excludes Python 3.13, so deployment installs these two official source trees.
+kokoro @ git+https://github.com/hexgrad/kokoro.git
+misaki @ git+https://github.com/hexgrad/misaki.git
+loguru>=0.7,<1
+attrs>=25,<27
+soundfile>=0.12,<1
+spacy==3.8.16
+spacy-curated-transformers==0.3.0
+fugashi>=1.3,<2
+jaconv>=0.4,<1
+mojimoji>=0.0.12,<1
+pyopenjtalk>=0.4,<1
+unidic-lite>=1,<2
+num2words>=0.5,<1
+espeakng-loader>=0.2,<1
+phonemizer-fork>=3.3,<4
+
+# Test dependencies
+pytest>=8,<9
+pytest-asyncio>=0.24,<2

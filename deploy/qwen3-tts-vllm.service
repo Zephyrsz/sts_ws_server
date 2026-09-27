@@ -1,0 +1,22 @@
+[Unit]
+Description=Qwen3-TTS vLLM-Omni inference service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=roger
+Group=roger
+WorkingDirectory=/app/sts_ws_server
+Environment=CUDA_VISIBLE_DEVICES=0
+Environment=HF_HUB_OFFLINE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/app/sts_ws_server/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+ExecStart=/app/sts_ws_server/venv/bin/vllm serve /app/sts_ws_server/models/tts/qwen3 --deploy-config /app/sts_ws_server/venv/lib/python3.13/site-packages/vllm_omni/deploy/qwen3_tts.yaml --omni --host 127.0.0.1 --port 8091 --trust-remote-code --enforce-eager --served-model-name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=0
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

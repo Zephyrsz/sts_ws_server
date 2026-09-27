@@ -1,0 +1,29 @@
+[Unit]
+Description=Kokoro Japanese TTS WebSocket adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=roger
+Group=roger
+WorkingDirectory=/app/sts_ws_server/service-src
+EnvironmentFile=/app/sts_ws_server/wss.env
+Environment=SERVICE_NAME=kokoro
+Environment=KOKORO_TTS_BACKEND=kokoro
+Environment=KOKORO_TTS_MODEL_PATH=/app/sts_ws_server/models/tts/kokoro
+Environment=KOKORO_TTS_DEVICE=cuda
+Environment=KOKORO_TTS_LANGUAGE=ja
+Environment=KOKORO_TTS_VOICE=jf_alpha
+Environment=KOKORO_TTS_SAMPLE_RATE=24000
+Environment=KOKORO_TTS_MAX_TEXT_CHARS=10000
+Environment=KOKORO_TTS_AUDIO_CHUNK_BYTES=4096
+Environment=MAX_CONCURRENT_REQUESTS=1
+Environment=MODEL_TIMEOUT_SECONDS=300
+ExecStart=/app/sts_ws_server/venv/bin/uvicorn sts_ws_server.app:app --host 127.0.0.1 --port 18101 --workers 1
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+[Unit]
+Description=Sarashina Japanese TTS WebSocket adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=roger
+Group=roger
+WorkingDirectory=/app/sts_ws_server
+EnvironmentFile=/app/sts_ws_server/wss.env
+EnvironmentFile=-/app/sts_ws_server/sarashina.env
+Environment=PYTHONPATH=/app/sts_ws_server/src:/app/sts_ws_server/sarashina2.2-tts-source
+Environment=CUDA_VISIBLE_DEVICES=3
+Environment=HF_HOME=/app/sts_ws_server/.cache/huggingface
+Environment=XDG_CACHE_HOME=/app/sts_ws_server/.cache
+Environment=HF_HUB_OFFLINE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/app/sts_ws_server/venv-sarashina/bin/uvicorn sts_ws_server.sarashina_wss:create_app_from_env --factory --host 127.0.0.1 --port 18102 --workers 1
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=0
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

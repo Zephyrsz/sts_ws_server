@@ -16,7 +16,15 @@ dependencies = [
 [project.optional-dependencies]
 asr = ["faster-whisper>=1.1,<2"]
 vad = ["onnxruntime>=1.17.0"]
-kotoba = ["torch>=2.2", "transformers>=4.39,<5", "accelerate>=0.28"]
+kotoba = ["torch>=2.2", "transformers>=5.5.3,<6", "accelerate>=0.28"]
+qwen3-asr = [
+    "qwen-asr==0.0.6",
+    "torch>=2.2",
+    "transformers==4.57.6",
+    "accelerate==1.12.0",
+    "numpy>=1.26",
+]
+kokoro = ["kokoro>=0.9.4,<1", "misaki[ja]>=0.9.4,<1"]
 test = ["pytest>=8,<9", "pytest-asyncio>=0.24,<2", "httpx>=0.28,<1", "numpy>=1.26"]
 
 [tool.pytest.ini_options]

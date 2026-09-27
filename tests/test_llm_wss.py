@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from sts_ws_server.llm_wss import LLMWSSSettings, create_llm_app
+from sts_ws_server.llm_wss import JAPANESE_SYSTEM_PROMPT, LLMWSSSettings, create_llm_app
 
 
 def make_client(transport: httpx.AsyncBaseTransport) -> TestClient:
@@ -21,10 +21,21 @@ def make_client(transport: httpx.AsyncBaseTransport) -> TestClient:
     return TestClient(app)
 
 
+def test_llm_healthz_reports_ready_when_shared_key_is_configured() -> None:
+    async def handle(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("health checks must not call the model")
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "service": "llm-wss"}
+
+
 def test_chat_websocket_forwards_streamed_text_and_tool_call_deltas() -> None:
     captured: dict[str, object] = {}
     sse_body = (
-        'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}\n\n'
+        'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"こんにちは"},"finish_reason":null}]}\n\n'
         'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\\\"city\\\":\\\"To"}}]},"finish_reason":null}]}\n\n'
         'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"kyo\\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n'
         "data: [DONE]\n\n"
@@ -49,7 +60,7 @@ def test_chat_websocket_forwards_streamed_text_and_tool_call_deltas() -> None:
                 {
                     "model": "ignored-client-model",
                     "stream": False,
-                    "messages": [{"role": "user", "content": "What's the weather in Tokyo?"}],
+                    "messages": [{"role": "user", "content": "请介绍一下东京的天气。"}],
                     "tools": [
                         {
                             "type": "function",
@@ -73,7 +84,13 @@ def test_chat_websocket_forwards_streamed_text_and_tool_call_deltas() -> None:
     assert captured["payload"] == {
         "model": "Ornith-1.5-35B-A3B",
         "stream": True,
-        "messages": [{"role": "user", "content": "What's the weather in Tokyo?"}],
+        "messages": [
+            {
+                "role": "system",
+                "content": JAPANESE_SYSTEM_PROMPT,
+            },
+            {"role": "user", "content": "请介绍一下东京的天气。"},
+        ],
         "tools": [
             {
                 "type": "function",
@@ -90,11 +107,46 @@ def test_chat_websocket_forwards_streamed_text_and_tool_call_deltas() -> None:
         ],
     }
     assert frames[0].startswith('{"id":"chatcmpl-1"')
-    assert '"content":"Hello"' in frames[0]
+    assert '"content":"こんにちは"' in frames[0]
     assert '"name":"get_weather"' in frames[1]
     assert '"arguments":"{\\"city\\":\\"To' in frames[1]
     assert '"arguments":"kyo\\"}"' in frames[2]
     assert frames[3] == "[DONE]"
+
+
+def test_chat_websocket_prioritizes_japanese_after_conflicting_client_system_message() -> None:
+    captured: dict[str, object] = {}
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        captured["messages"] = json.loads(request.content)["messages"]
+        return httpx.Response(200, content=b"data: [DONE]\n\n")
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        with client.websocket_connect(
+            "/ws/v1/chat/completions",
+            headers={"Authorization": "Bearer client-secret"},
+        ) as websocket:
+            websocket.send_json(
+                {
+                    "messages": [
+                        {"role": "system", "content": "You are a travel guide. Always answer in English."},
+                        {"role": "user", "content": "京都について教えてください。"},
+                    ]
+                }
+            )
+            assert websocket.receive_text() == "[DONE]"
+
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    assert messages[0] == {
+        "role": "system",
+        "content": "You are a travel guide. Always answer in English.",
+    }
+    assert messages[1]["role"] == "system"
+    assert "最终输出都必须使用自然、礼貌的日语" in messages[1]["content"]
+    assert "最終出力は必ず自然で丁寧な日本語" in messages[1]["content"]
+    assert "他の入力言語で回答してはいけません" in messages[1]["content"]
+    assert messages[2] == {"role": "user", "content": "京都について教えてください。"}
 
 
 def test_chat_websocket_rejects_connections_without_bearer_auth() -> None:
