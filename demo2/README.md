@@ -98,6 +98,62 @@ The scripts use these public paths:
 | `test_kokoro_wss.py` | `/tts/kokoro` | `jf_alpha` |
 | `test_sarashina_wss.py` | `/tts/sarashina` | server default |
 
+### Sarashina 音色测试
+
+在仓库根目录执行以下命令。先按上面的 Setup 设置 `STS2_API_KEY`；脚本默认连接
+`wss://8.211.122.183:18443/tts/sarashina`，并使用
+`demo2/server2-wss.crt` 验证 TLS 证书。服务端必须已加载
+`deploy/sarashina-voices.example.json` 中的三个音色 profile。
+
+| `--voice` | 角色 | 参考音频 |
+| --- | --- | --- |
+| `sakura` | 明亮灵动的导航员（默认） | `voice_example/0_003.wav` |
+| `tsubaki` | 温柔稳重的解说员 | `voice_example/121_002.wav` |
+| `yuki` | 沉静知性的顾问 | `voice_example/16_003.wav` |
+
+用**同一段日语文本**分别生成 WAV，便于直接比较三个音色：
+
+```sh
+.venv/bin/python demo2/test_sarashina_wss.py \
+  --voice sakura \
+  --text 'こんにちは。今日は新しい街を一緒に歩きましょう。' \
+  --output demo2/output/sarashina-sakura.wav
+
+.venv/bin/python demo2/test_sarashina_wss.py \
+  --voice tsubaki \
+  --text 'こんにちは。今日は新しい街を一緒に歩きましょう。' \
+  --output demo2/output/sarashina-tsubaki.wav
+
+.venv/bin/python demo2/test_sarashina_wss.py \
+  --voice yuki \
+  --text 'こんにちは。今日は新しい街を一緒に歩きましょう。' \
+  --output demo2/output/sarashina-yuki.wav
+```
+
+每条命令会发送一条 `response.create` 请求，例如 `tsubaki` 对应：
+
+```json
+{"type":"response.create","text":"こんにちは。今日は新しい街を一緒に歩きましょう。","language":"ja","voice":"tsubaki"}
+```
+
+成功时，服务端依次返回 `response.audio.started`、PCM16LE 二进制音频帧和
+`response.completed`；脚本打印 `PASS sarashina`、采样率、帧数及输出路径，并保存
+24 kHz 单声道 WAV。省略 `--voice` 时使用服务端默认的 `sakura`。试听时应能区分
+三个角色，但随机采样可能使同一角色每次的语速、音高和语气略有变化。
+
+错误参数也可验证：`--voice robot` 应使脚本退出并打印
+`FAIL: unknown Sarashina voice: robot`，不会生成新的 WAV。建议为此类测试指定
+一个尚不存在的 `--output` 路径，避免误把先前的文件当作本次结果。
+
+不连接 GPU 服务时，运行本地单元测试验证音色配置解析、默认音色、缓存复用、
+WebSocket 路由和未知音色报错：
+
+```sh
+.venv/bin/python -m pytest -q tests/test_sarashina_wss.py tests/test_demo2_tts_scripts.py
+```
+
+这些测试使用模拟生成器，不评价实际音质；音色效果以以上三个真实 WSS 输出为准。
+
 Use `--base-url` to point at another gateway. TLS verification trusts
 `demo2/server2-wss.crt`; `--insecure` disables it only for temporary
 diagnostics. CosyVoice has no deployed endpoint on server 2, so there is no
@@ -128,10 +184,3 @@ The standalone checks map to the public endpoints as follows:
 | --- | --- | --- |
 | `test_asr_wss.py` | `/asr/v1/realtime` | 16 kHz PCM16LE or matching WAV; prints transcript |
 | `test_llm_wss.py` | `/ws/v1/chat/completions` | Chat prompt; prints streamed text |
-
-After the server has a configured Sarashina reference WAV and matching Japanese
-transcript, test it with:
-
-```sh
-.venv/bin/python demo2/test_sarashina_wss.py --output demo2/sarashina-output.wav
-```
