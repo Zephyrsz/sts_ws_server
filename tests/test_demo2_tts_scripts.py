@@ -40,3 +40,9 @@ def test_common_helper_writes_pcm16_wave(tmp_path):
     output = tmp_path / "voice.wav"
     write_wav(output, b"\x00\x00" * 4, 24_000, 1)
     assert output.read_bytes().startswith(b"RIFF")
+
+
+def test_sarashina_script_accepts_a_voice_profile(monkeypatch):
+    module = load_script("test_sarashina_wss")
+    args = module.build_parser().parse_args(["--voice", "tsubaki"])
+    assert args.voice == "tsubaki"

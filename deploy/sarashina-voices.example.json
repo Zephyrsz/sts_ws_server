@@ -1,0 +1,20 @@
+{
+  "default_voice": "sakura",
+  "voices": {
+    "sakura": {
+      "label": "明亮灵动的导航员",
+      "audio": "../voice_example/0_003.wav",
+      "text": "底の角を右に曲がってしばらく歩けば左手に大きな建物が見えてくると思います。"
+    },
+    "tsubaki": {
+      "label": "温柔稳重的解说员",
+      "audio": "../voice_example/121_002.wav",
+      "text": "南の空で一番明るく光る星からゆっくりと線を結びます。"
+    },
+    "yuki": {
+      "label": "沉静知性的顾问",
+      "audio": "../voice_example/16_003.wav",
+      "text": "お湯加減はいかがですか。どこかかゆいところはありませんか。"
+    }
+  }
+}

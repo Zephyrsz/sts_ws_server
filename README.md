@@ -101,7 +101,21 @@ curl --cacert tls/tls.crt https://localhost:18443/healthz
 
 ### Sarashina 固定参考音色
 
-`deploy/sarashina.env.example` 配置了由 Sarashina 自身生成的日语女声参考音频 `reference/sarashina_female_self_reference.wav`，格式为 24 kHz、单声道 PCM16。部署时将该文件放在 `/app/sts_ws_server/reference/`，并将示例配置写入 `/app/sts_ws_server/sarashina.env`。`SARASHINA_REFERENCE_AUDIO` 和 `SARASHINA_REFERENCE_TEXT` 必须同时配置，文本应与参考音频内容一致。服务启动时提取参考特征，后续 WebSocket 连接复用同一音色；随机采样仍可能改变语调和语速。
+`/tts/sarashina` 支持通过 `voice` 字段选择零样本参考音色，仅影响 Sarashina endpoint。默认角色与三个角色的参考样音在 `deploy/sarashina-voices.example.json` 中配置；JSON 中相对音频路径相对于该配置文件解析。部署时将 `voice_example/` 和 `deploy/sarashina-voices.example.json` 一并同步到服务器，并在 Sarashina 环境文件中设置 `SARASHINA_VOICE_PROFILES=/app/sts_ws_server/deploy/sarashina-voices.example.json`。模型启动时为每个 profile 提取并缓存 speaker embedding、semantic tokens 和 mel 特征，后续连接按 `voice` 复用。`SARASHINA_REFERENCE_AUDIO` / `SARASHINA_REFERENCE_TEXT` 单参考配置仍兼容；启用 profile JSON 后以前者为准。随机采样仍可能改变语调和语速。
+
+| voice | 角色 | 参考音频 |
+| --- | --- | --- |
+| `sakura` | 明亮灵动的导航员 | `voice_example/0_003.wav` |
+| `tsubaki` | 温柔稳重的解说员 | `voice_example/121_002.wav` |
+| `yuki` | 沉静知性的顾问 | `voice_example/16_003.wav` |
+
+请求可显式选择角色；省略 `voice` 时使用配置中的 `default_voice`（当前为 `sakura`）：
+
+```json
+{"type":"response.create","text":"こんにちは。","language":"ja","voice":"tsubaki"}
+```
+
+三个 profile 的 transcript 必须与对应参考音频一致。增加角色时，在 JSON 的 `voices` 对象添加唯一 ID、显示名、音频路径和 transcript 即可；缺少参考文件时健康检查会返回 `not_ready`，未知 `voice` 会返回 `error`。
 
 ### LLM Chat WSS
 

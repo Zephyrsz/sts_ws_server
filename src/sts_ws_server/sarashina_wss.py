@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Mapping, Protocol
 
 import numpy as np
 from fastapi import FastAPI, WebSocket
@@ -19,7 +21,70 @@ class SarashinaBackendProtocol(Protocol):
     ready: bool
     not_ready_reason: str
 
-    async def synthesize(self, text: str) -> bytes: ...
+    def resolve_voice(self, voice: str | None) -> str | None: ...
+
+    async def synthesize(self, text: str, voice: str | None = None) -> bytes: ...
+
+
+class UnknownSarashinaVoice(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class SarashinaVoiceProfile:
+    audio_path: str
+    text: str
+    label: str = ""
+
+
+@dataclass(frozen=True)
+class SarashinaVoiceConditioning:
+    profile: SarashinaVoiceProfile
+    flow_embedding: object
+    audio_prompt_tokens: object
+    audio_prompt_feat: object
+
+
+def load_voice_profiles(
+    config_path: str | Path,
+) -> tuple[str, dict[str, SarashinaVoiceProfile]]:
+    path = Path(config_path).expanduser().resolve()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Sarashina voice profile config must be a JSON object")
+
+    default_voice = data.get("default_voice")
+    voice_data = data.get("voices")
+    if not isinstance(default_voice, str) or not default_voice:
+        raise ValueError("Sarashina voice profile config needs a default_voice")
+    if not isinstance(voice_data, dict) or not voice_data:
+        raise ValueError("Sarashina voice profile config needs a non-empty voices object")
+
+    profiles: dict[str, SarashinaVoiceProfile] = {}
+    for voice_id, values in voice_data.items():
+        if not isinstance(voice_id, str) or not voice_id.strip():
+            raise ValueError("Sarashina voice IDs must be non-empty strings")
+        if not isinstance(values, dict):
+            raise ValueError(f"Sarashina voice profile {voice_id!r} must be an object")
+        audio = values.get("audio")
+        text = values.get("text")
+        label = values.get("label", "")
+        if not isinstance(audio, str) or not audio.strip():
+            raise ValueError(f"Sarashina voice profile {voice_id!r} needs an audio path")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"Sarashina voice profile {voice_id!r} needs reference text")
+        if not isinstance(label, str):
+            raise ValueError(f"Sarashina voice profile {voice_id!r} label must be a string")
+        audio_path = Path(audio).expanduser()
+        if not audio_path.is_absolute():
+            audio_path = path.parent / audio_path
+        profiles[voice_id] = SarashinaVoiceProfile(
+            str(audio_path.resolve()), text.strip(), label.strip()
+        )
+
+    if default_voice not in profiles:
+        raise ValueError("Sarashina default_voice must name a configured voice")
+    return default_voice, profiles
 
 
 class SarashinaBackend:
@@ -31,6 +96,8 @@ class SarashinaBackend:
         *,
         prompt_path: str = "",
         prompt_text: str = "",
+        voice_profiles: Mapping[str, SarashinaVoiceProfile] | None = None,
+        default_voice: str | None = None,
         max_tokens: int = 2048,
     ) -> None:
         self.generator = generator
@@ -38,11 +105,22 @@ class SarashinaBackend:
         self.prompt_text = prompt_text.strip()
         self.max_tokens = max_tokens
         self._lock = asyncio.Lock()
+        self.default_voice = default_voice
+        self.voice_profiles = dict(voice_profiles or {})
+        self.voice_conditioning: dict[str, SarashinaVoiceConditioning] = {}
         self.ready = True
         self.not_ready_reason = ""
         self.flow_embedding = None
         self.audio_prompt_tokens = None
         self.audio_prompt_feat = None
+
+        if self.voice_profiles:
+            if self.default_voice not in self.voice_profiles:
+                self.ready = False
+                self.not_ready_reason = "default Sarashina voice is not configured"
+                return
+            self._load_voice_conditioning()
+            return
 
         if not self.prompt_path or not self.prompt_text:
             if self.prompt_path or self.prompt_text:
@@ -60,18 +138,76 @@ class SarashinaBackend:
         self.ready = True
         self.not_ready_reason = ""
 
-    async def synthesize(self, text: str) -> bytes:
-        async with self._lock:
-            return await asyncio.to_thread(self._synthesize, text)
+    @property
+    def available_voices(self) -> tuple[str, ...]:
+        return tuple(self.voice_profiles)
 
-    def _synthesize(self, text: str) -> bytes:
+    def _load_voice_conditioning(self) -> None:
+        for voice_id, profile in self.voice_profiles.items():
+            if not profile.audio_path or not profile.text:
+                self.ready = False
+                self.not_ready_reason = f"Sarashina voice {voice_id!r} needs audio and reference text"
+                self.voice_conditioning.clear()
+                return
+            if not Path(profile.audio_path).is_file():
+                self.ready = False
+                self.not_ready_reason = f"Sarashina reference audio is not available for voice {voice_id!r}"
+                self.voice_conditioning.clear()
+                return
+        try:
+            for voice_id, profile in self.voice_profiles.items():
+                self.voice_conditioning[voice_id] = SarashinaVoiceConditioning(
+                    profile=profile,
+                    flow_embedding=self.generator._extract_zero_shot_embedding(
+                        profile.audio_path
+                    ),
+                    audio_prompt_tokens=self.generator._extract_audio_prompt_tokens(
+                        profile.audio_path
+                    ),
+                    audio_prompt_feat=self.generator._extract_audio_prompt_feat(
+                        profile.audio_path
+                    ),
+                )
+        except Exception as exc:
+            self.voice_conditioning.clear()
+            self.ready = False
+            self.not_ready_reason = f"failed to load Sarashina voice profiles: {exc}"
+            logger.exception("Failed to load Sarashina voice profile conditioning")
+
+    def resolve_voice(self, voice: str | None) -> str | None:
+        selected = voice or self.default_voice
+        if selected is not None and selected not in self.voice_profiles:
+            raise UnknownSarashinaVoice(f"unknown Sarashina voice: {selected}")
+        return selected
+
+    async def synthesize(self, text: str, voice: str | None = None) -> bytes:
+        async with self._lock:
+            return await asyncio.to_thread(self._synthesize, text, voice)
+
+    def _synthesize(self, text: str, voice: str | None = None) -> bytes:
+        selected = self.resolve_voice(voice)
+        conditioning = self.voice_conditioning.get(selected) if selected else None
+        if conditioning is None and selected is None:
+            prompt_path = self.prompt_path
+            prompt_text = self.prompt_text
+            flow_embedding = self.flow_embedding
+            audio_prompt_tokens = self.audio_prompt_tokens
+            audio_prompt_feat = self.audio_prompt_feat
+        elif conditioning is None:
+            raise UnknownSarashinaVoice(f"unknown Sarashina voice: {selected}")
+        else:
+            prompt_path = conditioning.profile.audio_path
+            prompt_text = conditioning.profile.text
+            flow_embedding = conditioning.flow_embedding
+            audio_prompt_tokens = conditioning.audio_prompt_tokens
+            audio_prompt_feat = conditioning.audio_prompt_feat
         wavs = self.generator.generate(
             texts=[text],
-            flow_embedding=self.flow_embedding,
-            audio_prompt_text=self.prompt_text or None,
-            audio_prompt_tokens=self.audio_prompt_tokens,
-            audio_prompt_feat=self.audio_prompt_feat,
-            audio_prompt_path=self.prompt_path or None,
+            flow_embedding=flow_embedding,
+            audio_prompt_text=prompt_text or None,
+            audio_prompt_tokens=audio_prompt_tokens,
+            audio_prompt_feat=audio_prompt_feat,
+            audio_prompt_path=prompt_path or None,
             gen_kwargs={"max_tokens": self.max_tokens},
         )
         if not wavs:
@@ -101,6 +237,15 @@ def _build_backend_from_env() -> SarashinaBackend:
         device=os.environ.get("SARASHINA_TTS_DEVICE", "cuda:0"),
         watermark=True,
     )
+    profiles_path = os.environ.get("SARASHINA_VOICE_PROFILES", "").strip()
+    if profiles_path:
+        default_voice, profiles = load_voice_profiles(profiles_path)
+        return SarashinaBackend(
+            generator,
+            voice_profiles=profiles,
+            default_voice=default_voice,
+            max_tokens=int(os.environ.get("SARASHINA_MAX_TOKENS", "2048")),
+        )
     return SarashinaBackend(
         generator,
         prompt_path=os.environ.get("SARASHINA_REFERENCE_AUDIO", ""),
@@ -161,12 +306,22 @@ def create_app(
                 if len(text) > max_text_chars:
                     await websocket.send_json({"type": "error", "message": f"text exceeds {max_text_chars} characters"})
                     continue
+                voice = payload.get("voice")
+                if voice is not None and (not isinstance(voice, str) or not voice.strip()):
+                    await websocket.send_json({"type": "error", "message": "voice must be a non-empty string"})
+                    continue
                 language = payload.get("language")
                 if language and str(language).lower() not in {"ja", "jpn", "japanese"}:
                     await websocket.send_json({"type": "error", "message": "Sarashina service only accepts Japanese text"})
                     continue
                 if backend is None or not backend.ready:
                     await websocket.send_json({"type": "error", "message": "Sarashina model is not ready"})
+                    continue
+                try:
+                    resolver = getattr(backend, "resolve_voice", None)
+                    selected_voice = resolver(voice.strip() if voice else None) if resolver else voice
+                except UnknownSarashinaVoice as exc:
+                    await websocket.send_json({"type": "error", "message": str(exc)})
                     continue
 
                 try:
@@ -179,7 +334,7 @@ def create_app(
                         }
                     )
                     async with app.state.inference_limiter:
-                        audio = await backend.synthesize(text.strip())
+                        audio = await backend.synthesize(text.strip(), selected_voice)
                     if not audio or len(audio) % 2:
                         raise RuntimeError("Sarashina returned invalid PCM16 audio")
                     for offset in range(0, len(audio), chunk_bytes):

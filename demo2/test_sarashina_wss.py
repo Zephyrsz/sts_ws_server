@@ -15,6 +15,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_arguments(parser)
     parser.set_defaults(text=DEFAULT_TEXT, output=Path("demo2/sarashina-ja.wav"))
     parser.add_argument("--language", default="ja", help="Language passed to the adapter")
+    parser.add_argument(
+        "--voice",
+        help="Sarashina voice profile ID (sakura, tsubaki, or yuki)",
+    )
     return parser
 
 
@@ -28,7 +32,12 @@ def main(argv: list[str] | None = None) -> int:
         ca_cert=args.ca_cert,
         insecure=args.insecure,
         timeout=args.timeout,
-        request={"type": "response.create", "text": args.text, "language": args.language},
+        request={
+            "type": "response.create",
+            "text": args.text,
+            "language": args.language,
+            **({"voice": args.voice} if args.voice else {}),
+        },
         output=args.output,
     )
 
