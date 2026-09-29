@@ -115,7 +115,7 @@ def test_sarashina_can_synthesize_without_zero_shot_reference_prompt() -> None:
     assert generator.calls[0]["audio_prompt_path"] is None
 
 
-def test_sarashina_applies_default_three_db_gain() -> None:
+def test_sarashina_applies_default_six_db_gain() -> None:
     class FakeGenerator:
         def generate(self, **kwargs):
             return [np.asarray([0.25, -0.25], dtype=np.float32)]
@@ -124,7 +124,7 @@ def test_sarashina_applies_default_three_db_gain() -> None:
 
     audio = asyncio.run(backend.synthesize("こんにちは。"))
     samples = np.frombuffer(audio, dtype="<i2")
-    expected = int(round(0.25 * (10 ** (3.0 / 20.0)) * 32767.0))
+    expected = int(round(0.25 * (10 ** (6.0 / 20.0)) * 32767.0))
 
     assert samples.tolist() == [expected, -expected]
 

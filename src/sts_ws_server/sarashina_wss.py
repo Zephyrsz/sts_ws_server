@@ -104,7 +104,7 @@ class SarashinaBackend:
         voice_profiles: Mapping[str, SarashinaVoiceProfile] | None = None,
         default_voice: str | None = None,
         max_tokens: int = 2048,
-        gain_db: float = 3.0,
+        gain_db: float = 6.0,
     ) -> None:
         if not math.isfinite(gain_db):
             raise ValueError("Sarashina gain_db must be finite")
@@ -256,14 +256,14 @@ def _build_backend_from_env() -> SarashinaBackend:
             voice_profiles=profiles,
             default_voice=default_voice,
             max_tokens=int(os.environ.get("SARASHINA_MAX_TOKENS", "2048")),
-            gain_db=float(os.environ.get("SARASHINA_GAIN_DB", "3.0")),
+            gain_db=float(os.environ.get("SARASHINA_GAIN_DB", "6.0")),
         )
     return SarashinaBackend(
         generator,
         prompt_path=os.environ.get("SARASHINA_REFERENCE_AUDIO", ""),
         prompt_text=os.environ.get("SARASHINA_REFERENCE_TEXT", ""),
         max_tokens=int(os.environ.get("SARASHINA_MAX_TOKENS", "2048")),
-        gain_db=float(os.environ.get("SARASHINA_GAIN_DB", "3.0")),
+        gain_db=float(os.environ.get("SARASHINA_GAIN_DB", "6.0")),
     )
 
 
