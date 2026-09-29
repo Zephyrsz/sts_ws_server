@@ -101,7 +101,7 @@ def test_sarashina_can_synthesize_without_zero_shot_reference_prompt() -> None:
             return [np.asarray([0.5, -0.5], dtype=np.float32)]
 
     generator = FakeGenerator()
-    backend = SarashinaBackend(generator)
+    backend = SarashinaBackend(generator, gain_db=0.0)
 
     audio = asyncio.run(backend.synthesize("こんにちは。"))
 
@@ -113,6 +113,33 @@ def test_sarashina_can_synthesize_without_zero_shot_reference_prompt() -> None:
     assert generator.calls[0]["audio_prompt_tokens"] is None
     assert generator.calls[0]["audio_prompt_feat"] is None
     assert generator.calls[0]["audio_prompt_path"] is None
+
+
+def test_sarashina_applies_default_three_db_gain() -> None:
+    class FakeGenerator:
+        def generate(self, **kwargs):
+            return [np.asarray([0.25, -0.25], dtype=np.float32)]
+
+    backend = SarashinaBackend(FakeGenerator())
+
+    audio = asyncio.run(backend.synthesize("こんにちは。"))
+    samples = np.frombuffer(audio, dtype="<i2")
+    expected = int(round(0.25 * (10 ** (3.0 / 20.0)) * 32767.0))
+
+    assert samples.tolist() == [expected, -expected]
+
+
+def test_sarashina_gain_clips_without_pcm_overflow() -> None:
+    class FakeGenerator:
+        def generate(self, **kwargs):
+            return [np.asarray([0.9, -0.9], dtype=np.float32)]
+
+    backend = SarashinaBackend(FakeGenerator(), gain_db=6.0)
+
+    audio = asyncio.run(backend.synthesize("こんにちは。"))
+    samples = np.frombuffer(audio, dtype="<i2")
+
+    assert samples.tolist() == [32767, -32767]
 
 
 def test_sarashina_health_does_not_claim_ready_when_model_is_unavailable() -> None:

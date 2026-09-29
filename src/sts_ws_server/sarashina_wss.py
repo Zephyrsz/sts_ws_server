@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 import logging
+import math
 import os
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -103,11 +104,16 @@ class SarashinaBackend:
         voice_profiles: Mapping[str, SarashinaVoiceProfile] | None = None,
         default_voice: str | None = None,
         max_tokens: int = 2048,
+        gain_db: float = 3.0,
     ) -> None:
+        if not math.isfinite(gain_db):
+            raise ValueError("Sarashina gain_db must be finite")
         self.generator = generator
         self.prompt_path = prompt_path
         self.prompt_text = prompt_text.strip()
         self.max_tokens = max_tokens
+        self.gain_db = gain_db
+        self.gain_factor = 10 ** (gain_db / 20.0)
         self._lock = asyncio.Lock()
         self.default_voice = default_voice
         self.voice_profiles = dict(voice_profiles or {})
@@ -222,7 +228,8 @@ class SarashinaBackend:
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if audio.size == 0:
             raise RuntimeError("Sarashina returned empty audio")
-        return (np.clip(audio, -1.0, 1.0) * 32767.0).round().astype("<i2").tobytes()
+        amplified = np.clip(audio * self.gain_factor, -1.0, 1.0)
+        return (amplified * 32767.0).round().astype("<i2").tobytes()
 
 
 def _build_backend_from_env() -> SarashinaBackend:
@@ -249,12 +256,14 @@ def _build_backend_from_env() -> SarashinaBackend:
             voice_profiles=profiles,
             default_voice=default_voice,
             max_tokens=int(os.environ.get("SARASHINA_MAX_TOKENS", "2048")),
+            gain_db=float(os.environ.get("SARASHINA_GAIN_DB", "3.0")),
         )
     return SarashinaBackend(
         generator,
         prompt_path=os.environ.get("SARASHINA_REFERENCE_AUDIO", ""),
         prompt_text=os.environ.get("SARASHINA_REFERENCE_TEXT", ""),
         max_tokens=int(os.environ.get("SARASHINA_MAX_TOKENS", "2048")),
+        gain_db=float(os.environ.get("SARASHINA_GAIN_DB", "3.0")),
     )
 
 
