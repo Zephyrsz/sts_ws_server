@@ -7,8 +7,13 @@ After=qwen3-tts-vllm.service
 Type=simple
 User=roger
 Group=roger
+LogsDirectory=sts-ws-server
+LogsDirectoryMode=0750
+ReadWritePaths=/var/log/sts-ws-server
 WorkingDirectory=/app/sts_ws_server/service-src
 EnvironmentFile=/app/sts_ws_server/wss.env
+Environment=WSS_LOG_FILE=/var/log/sts-ws-server/qwen-tts-ws.log
+Environment=WSS_LOG_BACKUP_COUNT=14
 Environment=SERVICE_NAME=qwen-tts
 Environment=QWEN_TTS_BACKEND=openai
 Environment=QWEN_TTS_BASE_URL=http://127.0.0.1:8091/v1
@@ -19,6 +24,7 @@ Environment=MODEL_TIMEOUT_SECONDS=300
 ExecStart=/app/sts_ws_server/venv/bin/uvicorn sts_ws_server.app:app --host 127.0.0.1 --port 18100 --workers 1
 Restart=on-failure
 RestartSec=5
+UMask=0027
 LimitNOFILE=65535
 
 [Install]

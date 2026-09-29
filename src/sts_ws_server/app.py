@@ -4,6 +4,8 @@ import asyncio
 import hmac
 import json
 import logging
+import time
+from uuid import uuid4
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -20,6 +22,7 @@ from sts_ws_server.backends import (
     create_tts_backend,
 )
 from sts_ws_server.config import Settings
+from sts_ws_server.logging import ServiceEventLogger
 from sts_ws_server.vad import EnergyVAD, SileroONNXVAD
 
 logger = logging.getLogger(__name__)
@@ -35,19 +38,62 @@ def _is_authorized(websocket: WebSocket, settings: Settings) -> bool:
     return bool(settings.api_key) and hmac.compare_digest(authorization, expected)
 
 
-async def _accept_or_close(websocket: WebSocket, settings: Settings, service_name: str) -> bool:
+def _client_ip(websocket: WebSocket) -> str | None:
+    client = websocket.client
+    return getattr(client, "host", None) if client else None
+
+
+def _connection_id() -> str:
+    return uuid4().hex
+
+
+async def _accept_or_close(
+    websocket: WebSocket,
+    settings: Settings,
+    service_name: str,
+    event_logger: ServiceEventLogger,
+    connection_id: str,
+) -> bool:
+    fields = {
+        "connection_id": connection_id,
+        "client_ip": _client_ip(websocket),
+        "path": websocket.url.path,
+        "service_name": service_name,
+    }
     if not _enabled(service_name, settings):
+        event_logger.event("connection.rejected", reason="service_not_enabled", **fields)
         await websocket.close(code=4404, reason="service is not enabled")
         return False
     if not _is_authorized(websocket, settings):
+        event_logger.event("connection.rejected", reason="unauthorized", authorized=False, **fields)
         await websocket.close(code=4401, reason="valid bearer token required")
         return False
     await websocket.accept()
+    event_logger.event("connection.accepted", authorized=True, **fields)
     return True
 
 
-async def _error(websocket: WebSocket, message: str) -> None:
-    await websocket.send_json({"type": "error", "message": message})
+async def _send_json(
+    websocket: WebSocket,
+    event_logger: ServiceEventLogger,
+    connection_id: str,
+    payload: dict[str, Any],
+) -> None:
+    await websocket.send_json(payload)
+    event_logger.event("output.json", connection_id=connection_id, path=websocket.url.path, payload=payload)
+
+
+async def _error(
+    websocket: WebSocket,
+    message: str,
+    event_logger: ServiceEventLogger | None = None,
+    connection_id: str | None = None,
+) -> None:
+    payload = {"type": "error", "message": message}
+    if event_logger is None or connection_id is None:
+        await websocket.send_json(payload)
+    else:
+        await _send_json(websocket, event_logger, connection_id, payload)
 
 
 def _parse_text_message(message: dict[str, Any]) -> dict[str, Any] | None:
@@ -92,16 +138,34 @@ async def _stream_tts(
     text: str,
     voice: str | None,
     language: str | None,
+    event_logger: ServiceEventLogger,
+    connection_id: str,
 ) -> bool:
     sent_audio = False
+    total_bytes = 0
+    chunks_sent = 0
+    started = time.monotonic()
     async with limiter:
         chunks = backend.stream_audio(text, voice, language)
         async for chunk in _pcm_frames(chunks):
             if chunk:
                 await websocket.send_bytes(chunk)
                 sent_audio = True
+                total_bytes += len(chunk)
+                chunks_sent += 1
     if not sent_audio:
         raise ModelBackendError("TTS backend returned no audio")
+    event_logger.event(
+        "output.audio",
+        connection_id=connection_id,
+        path=websocket.url.path,
+        format="pcm_s16le",
+        sample_rate=getattr(backend, "sample_rate", None),
+        bytes=total_bytes,
+        frames=total_bytes // 2,
+        chunks=chunks_sent,
+        duration_ms=round((time.monotonic() - started) * 1000, 1),
+    )
     return sent_audio
 
 
@@ -113,6 +177,7 @@ def create_app(
     cosyvoice_tts_backend: TTSBackend | None = None,
     kokoro_tts_backend: TTSBackend | None = None,
 ) -> FastAPI:
+    event_logger = ServiceEventLogger.from_environment(settings.service_name)
     active_asr = asr_backend
     active_qwen = qwen_tts_backend
     active_cosyvoice = cosyvoice_tts_backend
@@ -142,6 +207,7 @@ def create_app(
                         await close()
                     except Exception:
                         logger.exception("Failed to close model backend resources")
+            event_logger.close()
 
     app = FastAPI(
         title="Speech Model WebSocket Services",
@@ -155,6 +221,7 @@ def create_app(
     app.state.qwen_tts_backend = active_qwen
     app.state.cosyvoice_tts_backend = active_cosyvoice
     app.state.kokoro_tts_backend = active_kokoro
+    app.state.event_logger = event_logger
     app.state.inference_limiter = asyncio.Semaphore(settings.max_concurrent_requests)
     if settings.vad_backend == "energy":
         vad = EnergyVAD(
@@ -200,41 +267,55 @@ def create_app(
 
     @app.websocket("/asr/v1/realtime")
     async def asr_realtime(websocket: WebSocket) -> None:
-        if not await _accept_or_close(websocket, settings, "asr"):
+        connection_id = _connection_id()
+        if not await _accept_or_close(websocket, settings, "asr", event_logger, connection_id):
             return
         assert active_asr is not None
-        await websocket.send_json(
-            {
-                "type": "session.created",
-                "audio_format": "pcm_s16le",
-                "sample_rate": 16_000,
-                "channels": 1,
-            }
-        )
         audio = bytearray()
         language: str | None = None
         max_audio_bytes = 16_000 * 2 * settings.max_audio_seconds
         try:
+            await _send_json(
+                websocket,
+                event_logger,
+                connection_id,
+                {
+                    "type": "session.created",
+                    "audio_format": "pcm_s16le",
+                    "sample_rate": 16_000,
+                    "channels": 1,
+                },
+            )
             while True:
                 message = await websocket.receive()
                 if message["type"] == "websocket.disconnect":
                     return
                 binary = message.get("bytes")
                 if binary is not None:
+                    event_logger.event(
+                        "input.audio",
+                        connection_id=connection_id,
+                        path=websocket.url.path,
+                        format="pcm_s16le",
+                        sample_rate=16_000,
+                        bytes=len(binary),
+                        frames=len(binary) // 2,
+                    )
                     if len(binary) % 2:
-                        await _error(websocket, "audio frames must contain complete PCM16 samples")
+                        await _error(websocket, "audio frames must contain complete PCM16 samples", event_logger, connection_id)
                         continue
                     if len(audio) + len(binary) > max_audio_bytes:
                         audio.clear()
-                        await _error(websocket, f"audio exceeds {settings.max_audio_seconds} seconds")
+                        await _error(websocket, f"audio exceeds {settings.max_audio_seconds} seconds", event_logger, connection_id)
                         continue
                     audio.extend(binary)
                     continue
 
                 payload = _parse_text_message(message)
                 if payload is None:
-                    await _error(websocket, "expected a JSON object message")
+                    await _error(websocket, "expected a JSON object message", event_logger, connection_id)
                     continue
+                event_logger.event("input.json", connection_id=connection_id, path=websocket.url.path, payload=payload)
                 message_type = payload.get("type")
                 if message_type == "session.update":
                     try:
@@ -242,10 +323,10 @@ def create_app(
                         if language and len(language) > 32:
                             raise ValueError("'language' is too long")
                     except ValueError as exc:
-                        await _error(websocket, str(exc))
+                        await _error(websocket, str(exc), event_logger, connection_id)
                     continue
                 if message_type != "input_audio.commit":
-                    await _error(websocket, "expected session.update or input_audio.commit")
+                    await _error(websocket, "expected session.update or input_audio.commit", event_logger, connection_id)
                     continue
 
                 committed = bytes(audio)
@@ -258,14 +339,19 @@ def create_app(
                     else:
                         result = Transcript(text="", language=language or "und", segments=[])
                 except ModelBackendError as exc:
-                    await _error(websocket, str(exc))
+                    event_logger.event("request.error", connection_id=connection_id, path=websocket.url.path, message=str(exc))
+                    await _error(websocket, str(exc), event_logger, connection_id)
                     continue
                 except Exception:
                     logger.exception("ASR request failed")
-                    await _error(websocket, "ASR inference failed")
+                    event_logger.event("request.error", connection_id=connection_id, path=websocket.url.path, message="ASR inference failed")
+                    await _error(websocket, "ASR inference failed", event_logger, connection_id)
                     continue
 
-                await websocket.send_json(
+                await _send_json(
+                    websocket,
+                    event_logger,
+                    connection_id,
                     {
                         "type": "transcription.completed",
                         "text": result.text,
@@ -276,10 +362,13 @@ def create_app(
                 )
         except WebSocketDisconnect:
             return
+        finally:
+            event_logger.event("connection.closed", connection_id=connection_id, path=websocket.url.path)
 
     @app.websocket("/tts/v1/realtime")
     async def qwen_tts_realtime(websocket: WebSocket) -> None:
-        if not await _accept_or_close(websocket, settings, "qwen-tts"):
+        connection_id = _connection_id()
+        if not await _accept_or_close(websocket, settings, "qwen-tts", event_logger, connection_id):
             return
         assert active_qwen is not None
         try:
@@ -289,10 +378,11 @@ def create_app(
                     return
                 payload = _parse_text_message(message)
                 if payload is None:
-                    await _error(websocket, "expected a JSON object message")
+                    await _error(websocket, "expected a JSON object message", event_logger, connection_id)
                     continue
+                event_logger.event("input.json", connection_id=connection_id, path=websocket.url.path, payload=payload)
                 if payload.get("type") != "response.create":
-                    await _error(websocket, "expected response.create")
+                    await _error(websocket, "expected response.create", event_logger, connection_id)
                     continue
                 try:
                     text = _string_field(payload, "text", required=True)
@@ -300,7 +390,10 @@ def create_app(
                     language = _string_field(payload, "language")
                     if len(text or "") > settings.max_text_chars:
                         raise ValueError(f"text exceeds {settings.max_text_chars} characters")
-                    await websocket.send_json(
+                    await _send_json(
+                        websocket,
+                        event_logger,
+                        connection_id,
                         {
                             "type": "response.audio.started",
                             "format": "pcm_s16le",
@@ -315,23 +408,28 @@ def create_app(
                         text or "",
                         voice,
                         language,
+                        event_logger,
+                        connection_id,
                     )
-                    await websocket.send_json({"type": "response.completed"})
+                    await _send_json(websocket, event_logger, connection_id, {"type": "response.completed"})
                 except ValueError as exc:
-                    await _error(websocket, str(exc))
+                    await _error(websocket, str(exc), event_logger, connection_id)
                 except WebSocketDisconnect:
                     return
                 except ModelBackendError as exc:
-                    await _error(websocket, str(exc))
+                    await _error(websocket, str(exc), event_logger, connection_id)
                 except Exception:
                     logger.exception("Qwen-compatible TTS request failed")
-                    await _error(websocket, "TTS inference failed")
+                    await _error(websocket, "TTS inference failed", event_logger, connection_id)
         except WebSocketDisconnect:
             return
+        finally:
+            event_logger.event("connection.closed", connection_id=connection_id, path=websocket.url.path)
 
     @app.websocket("/tts/cosyvoice")
     async def cosyvoice_realtime(websocket: WebSocket) -> None:
-        if not await _accept_or_close(websocket, settings, "cosyvoice"):
+        connection_id = _connection_id()
+        if not await _accept_or_close(websocket, settings, "cosyvoice", event_logger, connection_id):
             return
         assert active_cosyvoice is not None
         started = False
@@ -342,12 +440,16 @@ def create_app(
                     return
                 payload = _parse_text_message(message)
                 if payload is None:
-                    await _error(websocket, "expected a JSON object message")
+                    await _error(websocket, "expected a JSON object message", event_logger, connection_id)
                     continue
+                event_logger.event("input.json", connection_id=connection_id, path=websocket.url.path, payload=payload)
                 message_type = payload.get("type")
                 if message_type == "start" and not started:
                     started = True
-                    await websocket.send_json(
+                    await _send_json(
+                        websocket,
+                        event_logger,
+                        connection_id,
                         {
                             "type": "audio_format",
                             "sample_rate": settings.cosyvoice_tts_sample_rate,
@@ -357,7 +459,7 @@ def create_app(
                     )
                     continue
                 if not started:
-                    await _error(websocket, "send start before text or end")
+                    await _error(websocket, "send start before text or end", event_logger, connection_id)
                     continue
                 if message_type == "text":
                     try:
@@ -371,27 +473,32 @@ def create_app(
                             text or "",
                             settings.cosyvoice_tts_voice,
                             _string_field(payload, "language"),
+                            event_logger,
+                            connection_id,
                         )
                     except ValueError as exc:
-                        await _error(websocket, str(exc))
+                        await _error(websocket, str(exc), event_logger, connection_id)
                     except WebSocketDisconnect:
                         return
                     except ModelBackendError as exc:
-                        await _error(websocket, str(exc))
+                        await _error(websocket, str(exc), event_logger, connection_id)
                     except Exception:
                         logger.exception("CosyVoice-compatible TTS request failed")
-                        await _error(websocket, "TTS inference failed")
+                        await _error(websocket, "TTS inference failed", event_logger, connection_id)
                     continue
                 if message_type == "end":
-                    await websocket.send_json({"type": "done"})
+                    await _send_json(websocket, event_logger, connection_id, {"type": "done"})
                     return
-                await _error(websocket, "expected text or end")
+                await _error(websocket, "expected text or end", event_logger, connection_id)
         except WebSocketDisconnect:
             return
+        finally:
+            event_logger.event("connection.closed", connection_id=connection_id, path=websocket.url.path)
 
     @app.websocket("/tts/kokoro")
     async def kokoro_realtime(websocket: WebSocket) -> None:
-        if not await _accept_or_close(websocket, settings, "kokoro"):
+        connection_id = _connection_id()
+        if not await _accept_or_close(websocket, settings, "kokoro", event_logger, connection_id):
             return
         assert active_kokoro is not None
         try:
@@ -401,10 +508,11 @@ def create_app(
                     return
                 payload = _parse_text_message(message)
                 if payload is None:
-                    await _error(websocket, "expected a JSON object message")
+                    await _error(websocket, "expected a JSON object message", event_logger, connection_id)
                     continue
+                event_logger.event("input.json", connection_id=connection_id, path=websocket.url.path, payload=payload)
                 if payload.get("type") != "response.create":
-                    await _error(websocket, "expected response.create")
+                    await _error(websocket, "expected response.create", event_logger, connection_id)
                     continue
                 try:
                     text = _string_field(payload, "text", required=True)
@@ -414,7 +522,10 @@ def create_app(
                         raise ValueError(
                             f"text exceeds {settings.kokoro_tts.max_text_chars} characters"
                         )
-                    await websocket.send_json(
+                    await _send_json(
+                        websocket,
+                        event_logger,
+                        connection_id,
                         {
                             "type": "response.audio.started",
                             "format": "pcm_s16le",
@@ -429,19 +540,23 @@ def create_app(
                         text or "",
                         voice,
                         language,
+                        event_logger,
+                        connection_id,
                     )
-                    await websocket.send_json({"type": "response.completed"})
+                    await _send_json(websocket, event_logger, connection_id, {"type": "response.completed"})
                 except ValueError as exc:
-                    await _error(websocket, str(exc))
+                    await _error(websocket, str(exc), event_logger, connection_id)
                 except WebSocketDisconnect:
                     return
                 except ModelBackendError as exc:
-                    await _error(websocket, str(exc))
+                    await _error(websocket, str(exc), event_logger, connection_id)
                 except Exception:
                     logger.exception("Kokoro TTS request failed")
-                    await _error(websocket, "TTS inference failed")
+                    await _error(websocket, "TTS inference failed", event_logger, connection_id)
         except WebSocketDisconnect:
             return
+        finally:
+            event_logger.event("connection.closed", connection_id=connection_id, path=websocket.url.path)
 
     return app
 

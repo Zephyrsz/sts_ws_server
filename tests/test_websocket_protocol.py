@@ -1,3 +1,4 @@
+import json
 import struct
 
 import pytest
@@ -79,6 +80,33 @@ def test_asr_protocol_runs_vad_inside_asr_service() -> None:
     assert len(asr.calls) == 1
     assert asr.calls[0][1] == "ja"
     assert len(asr.calls[0][0]) < len(make_audio(0, 4) + make_audio(2_000, 8) + make_audio(0, 4))
+
+
+def test_asr_logs_connection_input_output_and_audio_metadata(tmp_path, monkeypatch) -> None:
+    log_path = tmp_path / "asr-ws.log"
+    monkeypatch.setenv("WSS_LOG_FILE", str(log_path))
+    asr = RecordingASR()
+    settings = Settings(
+        service_name="asr",
+        common=CommonConfig(api_key="test-secret", vad_rms_threshold=500, vad_padding_ms=20),
+    )
+    app = create_app(settings, asr_backend=asr)
+
+    with TestClient(app) as client, client.websocket_connect(
+        "/asr/v1/realtime", headers={"Authorization": "Bearer test-secret"}
+    ) as websocket:
+        websocket.receive_json()
+        websocket.send_json({"type": "session.update", "language": "ja"})
+        websocket.send_bytes(make_audio(2_000, 2))
+        websocket.send_json({"type": "input_audio.commit"})
+        websocket.receive_json()
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    events = {record["event"] for record in records}
+    assert {"connection.accepted", "input.json", "input.audio", "output.json"} <= events
+    audio = next(record for record in records if record["event"] == "input.audio")
+    assert audio["bytes"] == len(make_audio(2_000, 2))
+    assert all("test-secret" not in line for line in log_path.read_text(encoding="utf-8").splitlines())
 
 
 def test_silent_asr_commit_returns_empty_transcript_without_model_call() -> None:

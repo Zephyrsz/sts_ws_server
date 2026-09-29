@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -53,6 +55,29 @@ def test_sarashina_wss_authenticates_and_streams_pcm16_audio() -> None:
     assert first_audio == second_audio == b"\x01\x00" * 4
     assert completed == {"type": "response.completed"}
     assert backend.calls == [("こんにちは。", None)]
+
+
+def test_sarashina_wss_logs_json_input_and_audio_output_metadata(tmp_path, monkeypatch) -> None:
+    log_path = tmp_path / "sarashina-ws.log"
+    monkeypatch.setenv("WSS_LOG_FILE", str(log_path))
+    backend = FakeSarashinaBackend(audio=b"\x01\x00" * 8)
+
+    with TestClient(create_app(api_key="secret", backend=backend, chunk_bytes=8)) as client:
+        with client.websocket_connect(
+            "/tts/sarashina", headers={"Authorization": "Bearer secret"}
+        ) as websocket:
+            websocket.send_json({"type": "response.create", "text": "こんにちは。"})
+            websocket.receive_json()
+            websocket.receive_bytes()
+            websocket.receive_bytes()
+            websocket.receive_json()
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    events = {record["event"] for record in records}
+    assert {"connection.accepted", "input.json", "output.audio", "output.json"} <= events
+    audio = next(record for record in records if record["event"] == "output.audio")
+    assert audio["bytes"] == 16
+    assert all("secret" not in line for line in log_path.read_text(encoding="utf-8").splitlines())
 
 
 def test_sarashina_wss_rejects_missing_bearer_authentication() -> None:

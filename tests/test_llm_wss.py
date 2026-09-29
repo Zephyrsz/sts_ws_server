@@ -114,6 +114,29 @@ def test_chat_websocket_forwards_streamed_text_and_tool_call_deltas() -> None:
     assert frames[3] == "[DONE]"
 
 
+def test_chat_websocket_logs_json_input_and_streamed_output(tmp_path, monkeypatch) -> None:
+    log_path = tmp_path / "llm-wss.log"
+    monkeypatch.setenv("WSS_LOG_FILE", str(log_path))
+
+    async def handle(_: httpx.Request) -> httpx.Response:
+        body = 'data: {"choices":[{"delta":{"content":"こんにちは"}}]}\n\ndata: [DONE]\n\n'
+        return httpx.Response(200, content=body.encode())
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        with client.websocket_connect(
+            "/ws/v1/chat/completions",
+            headers={"Authorization": "Bearer client-secret"},
+        ) as websocket:
+            websocket.send_json({"messages": [{"role": "user", "content": "hello"}]})
+            assert websocket.receive_text().startswith("{")
+            assert websocket.receive_text() == "[DONE]"
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    events = {record["event"] for record in records}
+    assert {"connection.accepted", "input.json", "output.text", "connection.closed"} <= events
+    assert all("client-secret" not in line and "model-secret" not in line for line in log_path.read_text(encoding="utf-8").splitlines())
+
+
 def test_chat_websocket_prioritizes_japanese_after_conflicting_client_system_message() -> None:
     captured: dict[str, object] = {}
 

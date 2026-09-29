@@ -7,8 +7,13 @@ Wants=network-online.target
 Type=simple
 User=roger
 Group=roger
+LogsDirectory=sts-ws-server
+LogsDirectoryMode=0750
+ReadWritePaths=/var/log/sts-ws-server
 WorkingDirectory=/app/sts_ws_server/asr-service
 EnvironmentFile=/etc/sts-ws-server/asr.env
+Environment=WSS_LOG_FILE=/var/log/sts-ws-server/asr-ws.log
+Environment=WSS_LOG_BACKUP_COUNT=14
 Environment=HOME=/tmp
 Environment=HF_HOME=/tmp/sts-ws-hf
 Environment=HF_HUB_OFFLINE=1

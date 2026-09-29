@@ -3,12 +3,15 @@ from __future__ import annotations
 import hmac
 import json
 import os
+from uuid import uuid4
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import httpx
 from fastapi import FastAPI, WebSocket
 from starlette.websockets import WebSocketDisconnect
+
+from sts_ws_server.logging import ServiceEventLogger
 
 
 JAPANESE_SYSTEM_PROMPT = (
@@ -50,6 +53,7 @@ def create_llm_app(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
+    event_logger = ServiceEventLogger.from_environment("llm-wss")
     timeout = httpx.Timeout(settings.read_timeout_s, connect=settings.connect_timeout_s)
 
     @asynccontextmanager
@@ -59,6 +63,7 @@ def create_llm_app(
             yield
         finally:
             await app.state.upstream.aclose()
+            event_logger.close()
 
     app = FastAPI(
         title="Ornith Chat Completions WebSocket",
@@ -77,26 +82,45 @@ def create_llm_app(
 
     @app.websocket("/ws/v1/chat/completions")
     async def chat_completions(websocket: WebSocket) -> None:
+        connection_id = uuid4().hex
+        connection_fields = {
+            "connection_id": connection_id,
+            "client_ip": getattr(websocket.client, "host", None) if websocket.client else None,
+            "path": websocket.url.path,
+        }
         authorization = websocket.headers.get("authorization", "")
         expected = f"Bearer {settings.api_key}"
         if not settings.api_key or not hmac.compare_digest(authorization, expected):
+            event_logger.event("connection.rejected", reason="unauthorized", authorized=False, **connection_fields)
             await websocket.close(code=4401, reason="valid bearer token required")
             return
 
         await websocket.accept()
+        event_logger.event("connection.accepted", authorized=True, **connection_fields)
+
+        async def send_json(payload: dict[str, object]) -> None:
+            await websocket.send_json(payload)
+            event_logger.event("output.json", payload=payload, **connection_fields)
+
+        async def send_text(data: str) -> None:
+            await websocket.send_text(data)
+            event_logger.event("output.text", text=data, **connection_fields)
+
         try:
             while True:
                 raw_request = await websocket.receive_text()
+                event_logger.event("input.text", chars=len(raw_request), **connection_fields)
                 try:
                     payload = json.loads(raw_request)
                 except json.JSONDecodeError:
-                    await websocket.send_json({"error": {"message": "request must be valid JSON"}})
+                    await send_json({"error": {"message": "request must be valid JSON"}})
                     await websocket.close(code=1003, reason="invalid JSON")
                     return
                 if not isinstance(payload, dict):
-                    await websocket.send_json({"error": {"message": "request must be a JSON object"}})
+                    await send_json({"error": {"message": "request must be a JSON object"}})
                     await websocket.close(code=1003, reason="invalid request")
                     return
+                event_logger.event("input.json", payload=payload, **connection_fields)
 
                 request_payload = {**payload, "model": settings.model, "stream": True}
                 messages = payload.get("messages")
@@ -123,7 +147,7 @@ def create_llm_app(
                         json=request_payload,
                     ) as response:
                         if response.is_error:
-                            await websocket.send_json(
+                            await send_json(
                                 {"error": {"message": f"LLM upstream returned HTTP {response.status_code}"}}
                             )
                             await websocket.close(code=1011, reason="LLM upstream error")
@@ -136,13 +160,13 @@ def create_llm_app(
                             data = line[5:].strip()
                             if not data:
                                 continue
-                            await websocket.send_text(data)
+                            await send_text(data)
                             if data == "[DONE]":
                                 received_done = True
                                 break
 
                         if not received_done:
-                            await websocket.send_json(
+                            await send_json(
                                 {"error": {"message": "LLM upstream ended before [DONE]"}}
                             )
                             await websocket.close(code=1011, reason="incomplete LLM stream")
@@ -150,15 +174,17 @@ def create_llm_app(
                 except WebSocketDisconnect:
                     return
                 except httpx.TimeoutException:
-                    await websocket.send_json({"error": {"message": "LLM upstream request timed out"}})
+                    await send_json({"error": {"message": "LLM upstream request timed out"}})
                     await websocket.close(code=1011, reason="LLM upstream timeout")
                     return
                 except httpx.HTTPError:
-                    await websocket.send_json({"error": {"message": "LLM upstream connection failed"}})
+                    await send_json({"error": {"message": "LLM upstream connection failed"}})
                     await websocket.close(code=1011, reason="LLM upstream connection failed")
                     return
         except WebSocketDisconnect:
             return
+        finally:
+            event_logger.event("connection.closed", **connection_fields)
 
     return app
 

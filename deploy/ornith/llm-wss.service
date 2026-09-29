@@ -8,8 +8,13 @@ Requires=llama-server.service
 Type=simple
 User=roger
 Group=roger
+LogsDirectory=sts-ws-server
+LogsDirectoryMode=0750
+ReadWritePaths=/var/log/sts-ws-server
 WorkingDirectory=/app/sts_ws_server
 EnvironmentFile=/app/sts_ws_server/ornith.env
+Environment=WSS_LOG_FILE=/var/log/sts-ws-server/llm-wss.log
+Environment=WSS_LOG_BACKUP_COUNT=14
 Environment=PYTHONPATH=/app/sts_ws_server/src
 ExecStart=/app/sts_ws_server/venv/bin/uvicorn sts_ws_server.llm_wss:app --host 127.0.0.1 --port 18444 --ssl-certfile /app/sts_ws_server/tls/llm-wss.crt --ssl-keyfile /app/sts_ws_server/tls/llm-wss.key --ws-max-size 4194304
 Restart=on-failure

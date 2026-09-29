@@ -5,6 +5,8 @@ import hmac
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
+from uuid import uuid4
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol
@@ -12,6 +14,8 @@ from typing import Mapping, Protocol
 import numpy as np
 from fastapi import FastAPI, WebSocket
 from starlette.websockets import WebSocketDisconnect
+
+from sts_ws_server.logging import ServiceEventLogger
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +268,21 @@ def create_app(
     if chunk_bytes < 2 or chunk_bytes % 2:
         raise ValueError("chunk_bytes must be a positive even number")
 
-    app = FastAPI(title="Sarashina Japanese TTS WebSocket", docs_url=None, redoc_url=None)
+    event_logger = ServiceEventLogger.from_environment("sarashina-ws")
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        try:
+            yield
+        finally:
+            event_logger.close()
+
+    app = FastAPI(
+        title="Sarashina Japanese TTS WebSocket",
+        docs_url=None,
+        redoc_url=None,
+        lifespan=lifespan,
+    )
     app.state.backend = backend
     app.state.inference_limiter = asyncio.Semaphore(1)
 
@@ -287,45 +305,58 @@ def create_app(
 
     @app.websocket("/tts/sarashina")
     async def sarashina_tts(websocket: WebSocket) -> None:
+        connection_id = uuid4().hex
+        connection_fields = {
+            "connection_id": connection_id,
+            "client_ip": getattr(websocket.client, "host", None) if websocket.client else None,
+            "path": websocket.url.path,
+        }
         authorization = websocket.headers.get("authorization", "")
         if not api_key or not hmac.compare_digest(authorization, f"Bearer {api_key}"):
+            event_logger.event("connection.rejected", reason="unauthorized", authorized=False, **connection_fields)
             await websocket.close(code=4401, reason="valid bearer token required")
             return
         await websocket.accept()
+        event_logger.event("connection.accepted", authorized=True, **connection_fields)
+
+        async def send_json(payload: dict[str, object]) -> None:
+            await websocket.send_json(payload)
+            event_logger.event("output.json", payload=payload, **connection_fields)
 
         try:
             while True:
                 payload = await websocket.receive_json()
+                event_logger.event("input.json", payload=payload, **connection_fields)
                 if not isinstance(payload, dict) or payload.get("type") != "response.create":
-                    await websocket.send_json({"type": "error", "message": "expected response.create"})
+                    await send_json({"type": "error", "message": "expected response.create"})
                     continue
                 text = payload.get("text")
                 if not isinstance(text, str) or not text.strip():
-                    await websocket.send_json({"type": "error", "message": "text must be a non-empty string"})
+                    await send_json({"type": "error", "message": "text must be a non-empty string"})
                     continue
                 if len(text) > max_text_chars:
-                    await websocket.send_json({"type": "error", "message": f"text exceeds {max_text_chars} characters"})
+                    await send_json({"type": "error", "message": f"text exceeds {max_text_chars} characters"})
                     continue
                 voice = payload.get("voice")
                 if voice is not None and (not isinstance(voice, str) or not voice.strip()):
-                    await websocket.send_json({"type": "error", "message": "voice must be a non-empty string"})
+                    await send_json({"type": "error", "message": "voice must be a non-empty string"})
                     continue
                 language = payload.get("language")
                 if language and str(language).lower() not in {"ja", "jpn", "japanese"}:
-                    await websocket.send_json({"type": "error", "message": "Sarashina service only accepts Japanese text"})
+                    await send_json({"type": "error", "message": "Sarashina service only accepts Japanese text"})
                     continue
                 if backend is None or not backend.ready:
-                    await websocket.send_json({"type": "error", "message": "Sarashina model is not ready"})
+                    await send_json({"type": "error", "message": "Sarashina model is not ready"})
                     continue
                 try:
                     resolver = getattr(backend, "resolve_voice", None)
                     selected_voice = resolver(voice.strip() if voice else None) if resolver else voice
                 except UnknownSarashinaVoice as exc:
-                    await websocket.send_json({"type": "error", "message": str(exc)})
+                    await send_json({"type": "error", "message": str(exc)})
                     continue
 
                 try:
-                    await websocket.send_json(
+                    await send_json(
                         {
                             "type": "response.audio.started",
                             "format": "pcm_s16le",
@@ -337,16 +368,27 @@ def create_app(
                         audio = await backend.synthesize(text.strip(), selected_voice)
                     if not audio or len(audio) % 2:
                         raise RuntimeError("Sarashina returned invalid PCM16 audio")
+                    event_logger.event(
+                        "output.audio",
+                        format="pcm_s16le",
+                        sample_rate=backend.sample_rate,
+                        bytes=len(audio),
+                        frames=len(audio) // 2,
+                        chunks=(len(audio) + chunk_bytes - 1) // chunk_bytes,
+                        **connection_fields,
+                    )
                     for offset in range(0, len(audio), chunk_bytes):
                         await websocket.send_bytes(audio[offset : offset + chunk_bytes])
-                    await websocket.send_json({"type": "response.completed"})
+                    await send_json({"type": "response.completed"})
                 except WebSocketDisconnect:
                     return
                 except Exception:
                     logger.exception("Sarashina synthesis failed")
-                    await websocket.send_json({"type": "error", "message": "Sarashina inference failed"})
+                    await send_json({"type": "error", "message": "Sarashina inference failed"})
         except WebSocketDisconnect:
             return
+        finally:
+            event_logger.event("connection.closed", **connection_fields)
 
     return app
 
