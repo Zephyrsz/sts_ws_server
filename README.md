@@ -30,6 +30,19 @@ LLM bridge 将 Chat Completions JSON 请求转发到本机 OpenAI 兼容的 `/v1
 
 要求 Docker Compose v2、可访问的模型推理服务，以及网关证书。推理模型可以和本目录分开部署在 GPU 主机或独立容器；这里的三个服务负责模型适配、WebSocket 协议、鉴权和流量隔离。
 
+### 统一 GPU 部署清单（本地）
+
+`deploy/gpu-services.json` 集中记录服务实例、物理 GPU ID、WebSocket/模型端口和 systemd unit。它包含当前 `pj_gpuserver2` 的本地快照，并预留了可启用的 Sarashina 副本。使用 `deploy/gpu_deployment.py` 可以在本地校验并渲染计划：
+
+```bash
+python3 deploy/gpu_deployment.py validate --config deploy/gpu-services.json
+python3 deploy/gpu_deployment.py plan --config deploy/gpu-services.json
+python3 deploy/gpu_deployment.py render \
+  --config deploy/gpu-services.json --output /tmp/sts-gpu-rendered
+```
+
+这些命令不会连接远程主机，不会执行 `systemctl` 或修改 Nginx。GPU 编号和添加 Sarashina 实例的规则见 [`deploy/README.md`](deploy/README.md)。
+
 ### Linux 主机本机部署 ASR
 
 ASR 也可以作为 systemd 服务直接运行在 Linux 主机上，不需要启动本仓库的 Docker Compose。`deploy/asr-ws.service` 绑定配置指定的内网地址；环境变量模板 `deploy/asr.env.example` 使用本地能量 VAD 和官方 Qwen3-ASR Transformers backend。其他 ASR backend 仍可按需配置。模型目录须预先准备 `config.json`、tokenizer、processor 元数据和 safetensors 权重文件。

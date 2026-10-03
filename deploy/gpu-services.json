@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "host": {
+    "name": "pj_gpuserver2",
+    "gpu_count": 8
+  },
+  "services": [
+    {
+      "id": "qwen-tts-0",
+      "kind": "qwen-tts",
+      "gpu_ids": [0],
+      "ws_port": 18100,
+      "model_port": 8091,
+      "allow_gpu_sharing": true,
+      "unit": "qwen3-tts-vllm.service + sts-ws-qwen.service"
+    },
+    {
+      "id": "kokoro-0",
+      "kind": "kokoro",
+      "gpu_ids": [0],
+      "ws_port": 18101,
+      "allow_gpu_sharing": true,
+      "unit": "kokoro-ws.service"
+    },
+    {
+      "id": "ornith-0",
+      "kind": "ornith",
+      "gpu_ids": [1, 2],
+      "ws_port": 18444,
+      "model_port": 18080,
+      "unit": "llama-server.service + llm-wss.service"
+    },
+    {
+      "id": "sarashina-0",
+      "kind": "sarashina",
+      "gpu_ids": [3],
+      "ws_port": 18102,
+      "unit": "sarashina-ws.service"
+    },
+    {
+      "id": "asr-0",
+      "kind": "asr",
+      "gpu_ids": [4],
+      "ws_port": 8011,
+      "unit": "asr-ws.service"
+    },
+    {
+      "id": "cosyvoice-0",
+      "kind": "cosyvoice",
+      "gpu_ids": [5],
+      "model_port": 18440,
+      "unit": "cosyvoice3.service"
+    },
+    {
+      "id": "sarashina-1",
+      "kind": "sarashina",
+      "gpu_ids": [6],
+      "ws_port": 18103,
+      "enabled": false,
+      "unit": "sarashina-ws@1.service"
+    }
+  ]
+}
